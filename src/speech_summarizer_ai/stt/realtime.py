@@ -5,22 +5,34 @@ WebRTC VAD（``webrtcvad-wheels``）を優先し、無ければ RMS 閾値。
 
 from __future__ import annotations
 
+import importlib
 import queue
 import threading
 from collections.abc import Callable
 from pathlib import Path
+from types import ModuleType
 
 import numpy as np
 
 from speech_summarizer_ai import settings as config
 from speech_summarizer_ai.stt.faster_whisper_engine import FastWhisperTranscriber
 
-try:
-    import webrtcvad
-except Exception:  # noqa: BLE001
-    webrtcvad = None
-
 _FRAME_SAMPLES_48K_10MS = 480
+
+
+def _webrtcvad_module() -> ModuleType | None:
+    """``webrtcvad-wheels`` が入っていればモジュールを返す（未インストールなら ``None``）。
+
+    トップレベルで ``import webrtcvad`` しない。PyInstaller が contrib の
+    ``hook-webrtcvad`` 解析で失敗しやすいため、実行時にだけ読み込む。
+
+    Returns:
+        ModuleType | None: ``webrtcvad`` モジュール。利用不可時は ``None``。
+    """
+    try:
+        return importlib.import_module("webrtcvad")
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def format_stt_timestamp(seconds: float) -> str:
@@ -119,8 +131,9 @@ def run_realtime_transcription_loop(
         return tr
 
     sr = config.SAMPLE_RATE
-    if webrtcvad is not None:
-        vad = webrtcvad.Vad(config.REALTIME_VAD_AGGRESSIVENESS)
+    vad_mod = _webrtcvad_module()
+    if vad_mod is not None:
+        vad = vad_mod.Vad(config.REALTIME_VAD_AGGRESSIVENESS)
 
         def frame_is_speech(frame: np.ndarray) -> bool:
             return bool(vad.is_speech(frame.tobytes(), sr))

@@ -48,7 +48,7 @@ python -m speech_summarizer_ai
 
 前提:
 
-- Windows PC、上記のとおり `requirements.txt` を満たした仮想環境
+- Windows PC、**このリポジトリ用**の仮想環境で `requirements.txt`（または `pip install -e .`）を満たしていること（別プロジェクトの venv だと `webrtcvad` 不足などで PyInstaller の hook が失敗することがあります）
 - リポジトリルートで作業する
 
 手順:
@@ -63,3 +63,5 @@ pyinstaller --noconfirm speech_summarizer_ai.spec
 ```bash
 pyinstaller --noconfirm --clean speech_summarizer_ai.spec
 ```
+
+成果物は **`dist/SpeechSummarizerAI.exe` の 1 ファイル**（onefile）です。初回起動時に展開のため、onedir 版より起動が遅くなることがあります。

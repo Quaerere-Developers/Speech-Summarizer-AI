@@ -5,14 +5,20 @@
 
     pyinstaller --noconfirm speech_summarizer_ai.spec
 
-成果物: ``dist/SpeechSummarizerAI/SpeechSummarizerAI.exe`` と同フォルダの ``_internal/``。
-配布時は **フォルダごと** コピーする（exe 単体では動きません）。
+成果物: **単一の** ``dist/SpeechSummarizerAI.exe``（onefile）。初回起動時に一時フォルダへ展開するため、
+起動が onedir 版より遅くなることがあります。配布はこの EXE 1 ファイルで足ります。
 
 データベース・モデル・セッションは Windows ではユーザーデータ領域に作成される
 （WinRT ``ApplicationData.local_folder``、または未パッケージ時は
 ``%LOCALAPPDATA%\\WEEL\\SpeechSummarizerAI``。``platform_utils.paths.project_root()``）。
 
 起動時セットアップは ``speech_summarizer_ai.ui.dialogs.startup_ai_models``（STT + Foundry LLM）。
+
+ビルドは **本リポジトリ用の仮想環境** で行い、``webrtcvad-wheels`` が ``import webrtcvad`` できること
+（``requirements.txt`` / ``pip install -e .``）を確認してください。別プロジェクトの venv だと hook が失敗します。
+
+``scripts/pyinstaller_hooks`` を ``hookspath`` で先に渡し、contrib の ``hook-webrtcvad`` より
+リポジトリ同梱の hook を優先します。
 """
 from __future__ import annotations
 
@@ -24,6 +30,7 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules
 _block_cipher = None
 _root = Path(SPECPATH)
 _icon_path = _root / "resources" / "icons" / "app.ico"
+_pyi_hooks = _root / "scripts" / "pyinstaller_hooks"
 
 datas: list[tuple[str, str]] = []
 if (_root / "resources").is_dir():
@@ -145,7 +152,7 @@ a = Analysis(
     binaries=_binaries_extra,
     datas=datas,
     hiddenimports=_hiddenimports,
-    hookspath=[],
+    hookspath=[str(_pyi_hooks)] if _pyi_hooks.is_dir() else [],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[],
@@ -160,13 +167,17 @@ pyz = PYZ(a.pure, a.zipped_data, cipher=_block_cipher)
 exe = EXE(
     pyz,
     a.scripts,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
     [],
-    exclude_binaries=True,
     name="SpeechSummarizerAI",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
+    upx_exclude=[],
+    runtime_tmpdir=None,
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -174,15 +185,4 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=str(_icon_path) if _icon_path.is_file() else None,
-)
-
-coll = COLLECT(
-    exe,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
-    strip=False,
-    upx=False,
-    upx_exclude=[], 
-    name="SpeechSummarizerAI",
 )
