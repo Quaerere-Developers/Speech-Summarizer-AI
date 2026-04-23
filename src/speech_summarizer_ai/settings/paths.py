@@ -22,3 +22,7 @@ MODELS_STT_SUBDIR: str = "stt"
 
 # ``models/`` 配下の LLM モデル用サブディレクトリ名。
 MODELS_LLM_SUBDIR: str = "llm"
+
+# Windows: ``%LOCALAPPDATA%`` 下のベンダー／アプリフォルダ（``QSettings("WEEL", ...)`` と揃える）。
+WINDOWS_APPDATA_VENDOR_DIR: str = "WEEL"
+WINDOWS_APPDATA_APP_DIR: str = "SpeechSummarizerAI"

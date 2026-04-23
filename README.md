@@ -7,9 +7,9 @@ Speech Summarizer AI アプリケーションです。
 - `src/speech_summarizer_ai/` — Python パッケージ本体（`settings` / `platform_utils` / `domain` / `data` / `audio` / `stt` / `llm` / `controllers` / `ui`）
 - `resources/icons/` — アプリアイコン（`app.svg` / Windows 用 `app.ico` / `app.png`）。PyInstaller ビルド時に同梱され、EXE にも埋め込まれる
 - `scripts/` — 開発用エントリーポイント（`run_dev.py` など）
-- `database/` — 開発時の SQLite（実行ファイル版では exe と同じフォルダに `database/` が作成されます）
-- `sessions/` — 録音セッション（同上）
-- `models/` — STT 等のローカルモデル（同上）
+- 実行時データ（SQLite・録音セッション・ローカルモデル）は **`platform_utils.paths.project_root()`** の基準で配置されます。
+  - **Windows:** 通常は `%LOCALAPPDATA%\WEEL\SpeechSummarizerAI\` 直下に `database/`・`sessions/`・`models/` が作成されます（MSIX 等で WinRT の `ApplicationData.local_folder` が使える場合はそちらを優先。未パッケージの EXE では上記にフォールバックします）。
+  - **Windows 以外:** リポジトリルート（`src` の親）直下に同じ名前のフォルダが使われます。
 - `tests/` — テスト
 - `speech_summarizer_ai.spec` — Windows 向け PyInstaller 定義
 
@@ -42,7 +42,7 @@ speech-summarizer-ai
 python -m speech_summarizer_ai
 ```
 
-録音はプロジェクトルート直下の `sessions/<セッションID>/audio.wav` に保存されます（配布用 exe を使う場合は **exe と同じフォルダ** 直下の `sessions/`）。
+録音は `sessions/<セッションID>/audio.wav` に保存されます（基準ディレクトリは上記の `project_root()`。Windows の配布版では **ユーザーデータ領域** 側の `sessions/` です）。
 
 ## Windows 実行ファイルの作成（PyInstaller）
 

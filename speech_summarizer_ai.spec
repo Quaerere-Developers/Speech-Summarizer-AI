@@ -8,7 +8,9 @@
 成果物: ``dist/SpeechSummarizerAI/SpeechSummarizerAI.exe`` と同フォルダの ``_internal/``。
 配布時は **フォルダごと** コピーする（exe 単体では動きません）。
 
-データベース・モデル・セッションは exe と同じフォルダ配下に作成される（``platform_utils.paths.project_root()``）。
+データベース・モデル・セッションは Windows ではユーザーデータ領域に作成される
+（WinRT ``ApplicationData.local_folder``、または未パッケージ時は
+``%LOCALAPPDATA%\\WEEL\\SpeechSummarizerAI``。``platform_utils.paths.project_root()``）。
 
 起動時セットアップは ``speech_summarizer_ai.ui.dialogs.startup_ai_models``（STT + Foundry LLM）。
 """
@@ -129,6 +131,10 @@ _hiddenimports = [
 _hiddenimports.extend(_foundry_hidden)
 try:
     _hiddenimports.extend(collect_submodules("foundry_local_sdk"))
+except Exception:
+    pass
+try:
+    _hiddenimports.extend(collect_submodules("winrt"))
 except Exception:
     pass
 _hiddenimports = list(dict.fromkeys(_hiddenimports))

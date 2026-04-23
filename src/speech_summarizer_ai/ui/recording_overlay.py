@@ -8,6 +8,7 @@ from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtWidgets import QApplication, QMessageBox, QWidget
 
 from speech_summarizer_ai.controllers.recording_controller import RecordingController
+from speech_summarizer_ai.platform_utils import paths
 from speech_summarizer_ai.ui.windows.meeting_summary_list import (
     MeetingSummaryListWindow,
 )
@@ -30,7 +31,7 @@ class RecordingOverlay(QObject):
         """
         super().__init__(None)
 
-        self._save_dir: Path = Path(__file__).resolve().parents[3]
+        self._save_dir: Path = paths.project_root()
         self._app_quit_started = False
         self._meeting_summary_list_window: MeetingSummaryListWindow | None = None
 

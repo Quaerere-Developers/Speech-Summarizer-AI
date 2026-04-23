@@ -12,6 +12,12 @@ PySide6_Addons==6.9.0
 PySide6_Essentials==6.9.0
 shiboken6==6.9.0
 
+# --- Windows ストレージ (WinRT ApplicationData / ユーザーデータルート) -------
+# platform_utils.paths.project_root() が MSIX 等で local_folder を解決するために使用。
+# 未パッケージ EXE では WinRT が使えず LOCALAPPDATA にフォールバックするが、依存は同梱してよい。
+winrt-runtime==3.2.1
+winrt-Windows.Storage==3.2.1
+
 # --- 数値計算 / 音声 ---------------------------------------------------------
 numpy==2.4.2
 SoundCard==0.4.5

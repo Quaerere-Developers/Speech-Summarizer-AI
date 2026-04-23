@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -66,13 +68,64 @@ def database_path(project_root: Path) -> Path:
     return database_directory(project_root) / config.DATABASE_FILENAME
 
 
-def project_root() -> Path:
-    """このパッケージからリポジトリルート（``src`` の親）を返す。
+def _repo_root() -> Path:
+    """インストール済みパッケージの場所からリポジトリルート（``src`` の親）を推定して返す。
+
+    非 Windows、または Windows でもユーザーデータルートを使わないフォールバックで
+    ``project_root`` から参照される。
 
     Returns:
-        Path: プロジェクトルート。
+        Path: ``platform_utils/paths.py`` から見た ``parents[3]``（通常はクローン直下）。
     """
     return Path(__file__).resolve().parents[3]
+
+
+def _windows_user_data_root() -> Path | None:
+    """Windows 用のユーザー別データルート（書き込み可能領域）。
+
+    優先: WinRT ``ApplicationData.current.local_folder``（MSIX 等でパッケージ ID がある場合）。
+    非パッケージ EXE では WinRT が使えないため、
+    ``%LOCALAPPDATA%/<vendor>/<app>`` にフォールバックする（従来インストーラ / PyInstaller 向け）。
+
+    Returns:
+        Path | None: Windows 以外、または ``LOCALAPPDATA`` が無い場合は ``None``。
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        from winrt.windows.storage import ApplicationData  # noqa: PLC0415
+
+        folder = ApplicationData.current.local_folder
+        p = folder.path
+        if p:
+            return Path(str(p))
+    except OSError:
+        # 例: WinError パッケージ ID なし（未パッケージの Win32 プロセス）
+        pass
+    except ImportError:
+        pass
+    local = os.environ.get("LOCALAPPDATA", "")
+    if not local:
+        return None
+    return (
+        Path(local) / config.WINDOWS_APPDATA_VENDOR_DIR / config.WINDOWS_APPDATA_APP_DIR
+    )
+
+
+def project_root() -> Path:
+    """DB・モデル・セッションの基準ディレクトリ（ユーザーデータルート）を返す。
+
+    Windows では WinRT のローカルフォルダ、または ``LOCALAPPDATA`` 下の
+    ``WEEL/SpeechSummarizerAI``（``database/``・``models/``・``sessions/`` をこの下に配置）。
+    それ以外の OS ではリポジトリルート（従来どおり）。
+
+    Returns:
+        Path: データルート。存在しない場合は親まで含めて作成する。
+    """
+    w = _windows_user_data_root()
+    root = w if w is not None else _repo_root()
+    root.mkdir(parents=True, exist_ok=True)
+    return root
 
 
 def models_directory(project_root: Path) -> Path:

@@ -28,6 +28,8 @@ from speech_summarizer_ai.settings.paths import (
     MODELS_STT_SUBDIR,
     SESSION_AUDIO_FILENAME,
     SESSIONS_DIR_NAME,
+    WINDOWS_APPDATA_APP_DIR,
+    WINDOWS_APPDATA_VENDOR_DIR,
 )
 from speech_summarizer_ai.settings.stt import (
     REALTIME_ENERGY_RMS_THRESHOLD,
@@ -67,6 +69,8 @@ __all__ = [
     "SESSION_AUDIO_FILENAME",
     "SESSIONS_DIR_NAME",
     "STT_DEVICE",
+    "WINDOWS_APPDATA_APP_DIR",
+    "WINDOWS_APPDATA_VENDOR_DIR",
     "STT_MODEL_OPTIONS",
     "SttDevice",
     "output_channel_count",

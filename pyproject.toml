@@ -28,6 +28,8 @@ classifiers = [
 # 推移依存は pip が自動解決する。再現性が必要な環境は requirements.txt を使う。
 dependencies = [
     "PySide6>=6.9,<7",
+    "winrt-Windows.Storage>=2.0; platform_system == 'Windows'",
+    "winrt-runtime>=2.0; platform_system == 'Windows'",
     "numpy>=2.0",
     "SoundCard>=0.4.3",
     "webrtcvad-wheels>=2.0.14",
