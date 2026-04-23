@@ -1,0 +1,73 @@
+"""設定定数（audio / paths / stt / llm）。``import settings as config`` で再公開。"""
+
+from __future__ import annotations
+
+from speech_summarizer_ai.settings.audio import (
+    BLOCK_FRAMES,
+    MONO_MIC_GAIN,
+    MONO_PC_GAIN,
+    RECORD_LAYOUT,
+    RecordLayout,
+    SAMPLE_RATE,
+    SAMPLE_WIDTH,
+    output_channel_count,
+)
+from speech_summarizer_ai.settings.llm import (
+    AUTO_LLM_SUMMARIZE_AFTER_STT,
+    FOUNDRY_LLM_APP_NAME,
+    FOUNDRY_LLM_CACHE_IN_PROJECT,
+    FOUNDRY_LLM_MODEL_ALIAS,
+    FOUNDRY_LLM_TITLE_MAX_CHARS,
+    FOUNDRY_LLM_TITLE_MAX_TOKENS,
+)
+from speech_summarizer_ai.settings.paths import (
+    DATABASE_DIR_NAME,
+    DATABASE_FILENAME,
+    MODELS_DIR_NAME,
+    MODELS_LLM_SUBDIR,
+    MODELS_STT_SUBDIR,
+    SESSION_AUDIO_FILENAME,
+    SESSIONS_DIR_NAME,
+)
+from speech_summarizer_ai.settings.stt import (
+    REALTIME_ENERGY_RMS_THRESHOLD,
+    REALTIME_MAX_UTTERANCE_SECONDS,
+    REALTIME_MIN_UTTERANCE_SAMPLES,
+    REALTIME_SILENCE_FRAMES_10MS,
+    REALTIME_VAD_AGGRESSIVENESS,
+    STT_DEVICE,
+    STT_MODEL_OPTIONS,
+    SttDevice,
+)
+
+__all__ = [
+    "AUTO_LLM_SUMMARIZE_AFTER_STT",
+    "BLOCK_FRAMES",
+    "DATABASE_DIR_NAME",
+    "DATABASE_FILENAME",
+    "FOUNDRY_LLM_APP_NAME",
+    "FOUNDRY_LLM_CACHE_IN_PROJECT",
+    "FOUNDRY_LLM_MODEL_ALIAS",
+    "FOUNDRY_LLM_TITLE_MAX_CHARS",
+    "FOUNDRY_LLM_TITLE_MAX_TOKENS",
+    "MODELS_DIR_NAME",
+    "MODELS_LLM_SUBDIR",
+    "MODELS_STT_SUBDIR",
+    "MONO_MIC_GAIN",
+    "MONO_PC_GAIN",
+    "REALTIME_ENERGY_RMS_THRESHOLD",
+    "REALTIME_MAX_UTTERANCE_SECONDS",
+    "REALTIME_MIN_UTTERANCE_SAMPLES",
+    "REALTIME_SILENCE_FRAMES_10MS",
+    "REALTIME_VAD_AGGRESSIVENESS",
+    "RECORD_LAYOUT",
+    "RecordLayout",
+    "SAMPLE_RATE",
+    "SAMPLE_WIDTH",
+    "SESSION_AUDIO_FILENAME",
+    "SESSIONS_DIR_NAME",
+    "STT_DEVICE",
+    "STT_MODEL_OPTIONS",
+    "SttDevice",
+    "output_channel_count",
+]
