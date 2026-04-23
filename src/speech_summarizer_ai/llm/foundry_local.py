@@ -569,6 +569,50 @@ class FoundryLocalSummarizer:
 
         _apply_chat_client_settings()
 
+    def download_model_weights_only(
+        self,
+        *,
+        model_download_progress: Callable[[float], None] | None = None,
+    ) -> None:
+        """起動時ダイアログ用に、モデル重みのダウンロードだけ行う。
+
+        実行プロバイダ（OpenVINO 等）の取得・登録（``download_and_register_eps``）は行わない。
+        初回の要約などで :meth:`load_model` を呼んだときに EP 登録と ``load`` が行われる。
+
+        Args:
+            model_download_progress: モデル DL 進捗（0〜100）を受け取るコールバック。
+
+        Returns:
+            None: キャッシュディレクトリへ重みを取得する。
+
+        Raises:
+            FoundryLocalNotAvailableError: SDK が利用できない場合。
+            Exception: カタログ取得や ``download`` の失敗。
+        """
+        self._ensure_manager()
+        assert self._manager is not None
+
+        catalog = self._manager.catalog
+
+        def _mdl(progress: float) -> None:
+            if model_download_progress is not None:
+                model_download_progress(progress)
+            else:
+                print(
+                    f"\rDownloading model: {progress:.2f}%",
+                    end="",
+                    flush=True,
+                )
+
+        download_handle = catalog.get_model(self._model_alias)
+        download_handle.download(_mdl)
+        if model_download_progress is None:
+            print()
+        print(
+            f"[summarize] LLM weights download only (no EP): alias={self._model_alias!r}",
+            flush=True,
+        )
+
     def unload(self) -> None:
         """ロード済みモデルハンドルをアンロードする。
 
