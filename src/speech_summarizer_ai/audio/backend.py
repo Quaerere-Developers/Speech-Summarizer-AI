@@ -1,12 +1,11 @@
-"""マイク・ループバック録音と WAV 出力（SoundCard / WASAPI）。
+"""マイク・ループバック録音と WAV 出力（PyAudioWPatch / WASAPI）。
 
-録音スレッドは ``record()`` とキュー投入のみ。NumPy 処理は別スレッドに寄せ、WASAPI の
+録音スレッドは read() とキュー投入のみ。NumPy 処理は別スレッドに寄せ、WASAPI の
 data discontinuity を抑える。停止時はセンチネルでキューを完走させる。
 """
 
 from __future__ import annotations
 
-import ctypes
 import queue
 import sys
 import threading
@@ -20,82 +19,32 @@ import numpy as np
 
 from speech_summarizer_ai import settings as config
 
-_sc = None
+_pa_module = None
 
 
-def _soundcard():
-    """SoundCard を遅延 import する。"""
-    global _sc
-    if _sc is None:
-        import soundcard as sc
+def _pyaudio() -> Any:
+    """PyAudioWPatch を遅延 import する。"""
+    global _pa_module
+    if _pa_module is None:
+        import pyaudiowpatch as pyaudio
 
-        _sc = sc
-    return _sc
-
-
-def _win32_com_init() -> bool:
-    """録音スレッドで WASAPI を使う前に COM を初期化する。
-
-    Returns:
-        bool: ``CoInitialize`` に成功した場合 ``True``。不要または失敗時は ``False``。
-    """
-    if sys.platform != "win32":
-        return False
-
-    hr = ctypes.windll.ole32.CoInitialize(None)
-    if hr == 0:
-        return True
-    if (hr + 2**32) == 0x80010106:  # RPC_E_CHANGED_MODE
-        return False
-    return False
+        _pa_module = pyaudio
+    return _pa_module
 
 
-def _win32_com_done(initialized: bool) -> None:
-    """COM の初期化を対になる形で解除する。
+def get_loopback_device_info(pa_instance: Any) -> dict | None:
+    """既定スピーカーに対応する WASAPI ループバックデバイス情報を返す。
 
     Args:
-        initialized: ``_win32_com_init`` が ``True`` を返した場合に ``True``。
+        pa_instance: ``pyaudiowpatch.PyAudio`` インスタンス。
 
     Returns:
-        None
+        dict | None: デバイス情報辞書。見つからなければ ``None``。
     """
-    if initialized and sys.platform == "win32":
-        ctypes.windll.ole32.CoUninitialize()
-
-
-def loopback_microphone() -> Any | None:
-    """既定スピーカーに対応するループバック入力（PC 再生音）を返す。
-
-    Returns:
-        Any | None: ループバック ``Microphone``。見つからなければ ``None``。
-    """
-    sc = _soundcard()
-    spk = sc.default_speaker()
     try:
-        mic = sc.get_microphone(spk.id, include_loopback=True)
-    except IndexError:
+        return pa_instance.get_default_wasapi_loopback()
+    except Exception:
         return None
-    if getattr(mic, "isloopback", False):
-        return mic
-    for m in sc.all_microphones(include_loopback=True):
-        if m.isloopback and m.id == spk.id:
-            return m
-    return None
-
-
-def recorder_channel_count(device: Any) -> int:
-    """デバイスが報告するチャンネル数を返す（WASAPI では最低 2ch を確保）。
-
-    Args:
-        device: SoundCard のマイク／ループバックデバイス。
-
-    Returns:
-        int: 録音に使用するチャンネル数（少なくとも 2）。
-    """
-    ch = device.channels
-    if isinstance(ch, int):
-        return max(ch, 2)
-    return max(len(ch), 2)
 
 
 def to_mono(samples: np.ndarray) -> np.ndarray:
@@ -148,6 +97,55 @@ def mix_to_mono_pcm(mono_mic: np.ndarray, mono_pc: np.ndarray) -> np.ndarray:
     return (np.clip(mixed, -1.0, 1.0) * 32767.0).astype(np.int16)
 
 
+def _bytes_to_float32(data: bytes, channels: int) -> np.ndarray:
+    """int16 PCM バイト列を shape=(frames, channels) の float32 配列に変換する。
+
+    Args:
+        data: int16 リトルエンディアン PCM バイト列。
+        channels: チャンネル数。
+
+    Returns:
+        np.ndarray: shape ``(frames, channels)`` の ``float32`` 配列（-1.0〜1.0 正規化済み）。
+    """
+    arr = np.frombuffer(data, dtype=np.int16)
+    if arr.size == 0 or channels == 0:
+        return np.zeros((0, max(channels, 1)), dtype=np.float32)
+    frames = arr.size // channels
+    return (
+        arr[: frames * channels].reshape(frames, channels).astype(np.float32) / 32768.0
+    )
+
+
+def _resample_to_target(
+    frames: np.ndarray, src_rate: int, target_len: int
+) -> np.ndarray:
+    """線形補間で ``frames`` を ``target_len`` サンプルにリサンプルする。
+
+    Args:
+        frames: shape ``(src_len, channels)`` の float32 配列。
+        src_rate: 入力のサンプルレート（ログ用。実際には src_len と target_len の比で計算）。
+        target_len: 出力フレーム数。
+
+    Returns:
+        np.ndarray: shape ``(target_len, channels)`` の float32 配列。
+    """
+    src_len = frames.shape[0]
+    if src_len == 0 or target_len == 0:
+        return np.zeros(
+            (target_len, frames.shape[1] if frames.ndim > 1 else 1), dtype=np.float32
+        )
+    if src_len == target_len:
+        return frames
+    indices = np.linspace(0, src_len - 1, target_len)
+    low = np.floor(indices).astype(np.int32)
+    high = np.minimum(low + 1, src_len - 1)
+    frac = (indices - low).astype(np.float32)
+    if frames.ndim == 1:
+        return frames[low] * (1.0 - frac) + frames[high] * frac
+    frac_2d = frac[:, np.newaxis]
+    return frames[low] * (1.0 - frac_2d) + frames[high] * frac_2d
+
+
 def _process_raw_pair(
     m: np.ndarray,
     l: np.ndarray | None,
@@ -160,7 +158,7 @@ def _process_raw_pair(
     """1 組の生フレームを混合し ``chunks`` に積み、任意でライブ STT に渡す（処理スレッド専用）。
 
     Args:
-        m: マイク ``record()`` の生配列。
+        m: マイクの float32 配列 shape ``(nm, channels)``。
         l: ループバック。無い場合は ``None``。
         nm: マイクフレームのサンプル数。
         chunks: PCM チャンクのリスト。
@@ -177,10 +175,8 @@ def _process_raw_pair(
             mono_l = np.zeros(nm, dtype=np.float32)
         else:
             mono_l = to_mono(l)
-            if nl < nm:
-                mono_l = np.concatenate([mono_l, np.zeros(nm - nl, dtype=np.float32)])
-            elif nl > nm:
-                mono_l = mono_l[:nm]
+            if nl != nm:
+                mono_l = to_mono(_resample_to_target(l, 0, nm))
     else:
         mono_l = np.zeros(nm, dtype=np.float32)
 
@@ -200,38 +196,62 @@ def _process_raw_pair(
 
 
 def capture_loop(
-    mic_rec: Any,
-    loop_rec: Any | None,
+    mic_stream: Any,
+    loopback_stream: Any | None,
+    mic_channels: int,
+    loopback_channels: int,
+    loopback_rate: int,
     stop_event: threading.Event,
     chunks: list[np.ndarray],
     chunk_lock: threading.Lock,
     live_mono_chunk_callback: Callable[[np.ndarray], None] | None = None,
 ) -> None:
-    """マイク（と任意のループバック）から録音し、処理スレッド経由で ``chunks`` に積む。
+    """PyAudioWPatch ストリームからマイク（と任意のループバック）を録音し ``chunks`` に積む。
+
+    マイクは ``config.SAMPLE_RATE`` で開く。ループバックはデバイスのネイティブレートで開き、
+    サンプルレートが異なる場合は処理スレッド内で線形補間リサンプルする。
 
     Args:
-        mic_rec: マイク ``Recorder``。
-        loop_rec: ループバック ``Recorder``。無ければ PC 音なし。
+        mic_stream: マイク PyAudio ストリーム。
+        loopback_stream: ループバック PyAudio ストリーム。無ければ ``None``。
+        mic_channels: マイクのチャンネル数。
+        loopback_channels: ループバックのチャンネル数。
+        loopback_rate: ループバックのサンプルレート（Hz）。
         stop_event: ループ終了用イベント。
         chunks: PCM チャンクのリスト。
         chunk_lock: ``chunks`` 用ロック。
-        live_mono_chunk_callback: 任意。リアルタイム STT 用 int16 モノラル（**処理スレッド**から呼ぶ）。
+        live_mono_chunk_callback: 任意。リアルタイム STT 用 int16 モノラル（処理スレッドから呼ぶ）。
 
     Returns:
         None
     """
-    raw_queue: queue.Queue[tuple[np.ndarray, np.ndarray | None, int] | None] = (
-        queue.Queue()
+    # ループバック読み取りフレーム数：サンプルレートが異なる場合に比例調整する
+    loopback_block_frames = (
+        int(config.BLOCK_FRAMES * loopback_rate / config.SAMPLE_RATE)
+        if loopback_stream is not None and loopback_rate != config.SAMPLE_RATE
+        else config.BLOCK_FRAMES
     )
 
+    raw_queue: queue.Queue[tuple[bytes, bytes | None] | None] = queue.Queue()
+
     def processor() -> None:
-        """キューから生フレームを取り出し ``_process_raw_pair`` に渡す。"""
+        """キューから生バイト列を取り出し変換・混合する。"""
         while True:
             item = raw_queue.get()
             if item is None:
                 return
-            m, l, nm = item
+            m_bytes, l_bytes = item
             try:
+                m = _bytes_to_float32(m_bytes, mic_channels)
+                nm = m.shape[0]
+                if l_bytes is not None and loopback_channels > 0:
+                    l_raw = _bytes_to_float32(l_bytes, loopback_channels)
+                    # ループバックレートが異なる場合リサンプル
+                    if loopback_rate != config.SAMPLE_RATE and l_raw.shape[0] != nm:
+                        l_raw = _resample_to_target(l_raw, loopback_rate, nm)
+                    l: np.ndarray | None = l_raw
+                else:
+                    l = None
                 _process_raw_pair(
                     m,
                     l,
@@ -248,16 +268,25 @@ def capture_loop(
 
     try:
         while not stop_event.is_set():
-            m = mic_rec.record(numframes=config.BLOCK_FRAMES)
-            nm = int(m.shape[0])
-            if nm == 0:
+            try:
+                m_bytes = mic_stream.read(
+                    config.BLOCK_FRAMES, exception_on_overflow=False
+                )
+            except Exception as e:  # noqa: BLE001
+                print(f"[audio] マイク読み取りエラー: {e}", file=sys.stderr, flush=True)
                 time.sleep(0.005)
                 continue
-            if loop_rec is not None:
-                l = loop_rec.record(numframes=nm)
-            else:
-                l = None
-            raw_queue.put((m, l, nm))
+
+            l_bytes: bytes | None = None
+            if loopback_stream is not None:
+                try:
+                    l_bytes = loopback_stream.read(
+                        loopback_block_frames, exception_on_overflow=False
+                    )
+                except Exception:  # noqa: BLE001
+                    l_bytes = None
+
+            raw_queue.put((m_bytes, l_bytes))
     finally:
         raw_queue.put(None)
         proc_thread.join()
@@ -271,8 +300,9 @@ def run_recording_session(
     *,
     live_mono_chunk_callback: Callable[[np.ndarray], None] | None = None,
 ) -> None:
-    """バックグラウンドスレッドから呼び出し、録音セッションを実行する。
+    """バックグラウンドスレッドから呼び出し、録音セッションを実行する（PyAudioWPatch）。
 
+    マイクと WASAPI ループバック（PC 再生音）を同時録音する。
     終了時に例外があれば ``error_slot[0]`` にメッセージ文字列を格納する。
 
     Args:
@@ -286,61 +316,105 @@ def run_recording_session(
         None
     """
     error_slot[0] = None
-    com_ok = _win32_com_init()
+    pyaudio = _pyaudio()
+    pa = pyaudio.PyAudio()
+
+    mic_stream = None
+    loopback_stream = None
+
     try:
-        sc = _soundcard()
-        mic_dev = sc.default_microphone()
-        loop_dev = loopback_microphone()
-        mic_ch = recorder_channel_count(mic_dev)
+        # --- マイクデバイス ---
+        mic_info = pa.get_default_input_device_info()
+        mic_index = int(mic_info["index"])
+        mic_channels = min(int(mic_info["maxInputChannels"]), 2)
+
+        # --- ループバックデバイス（PC 再生音）---
+        loopback_info = get_loopback_device_info(pa)
+        loopback_channels = 0
+        loopback_rate = config.SAMPLE_RATE
 
         with chunk_lock:
             chunks.clear()
 
-        if loop_dev is not None:
-            loop_ch = recorder_channel_count(loop_dev)
-            with (
-                mic_dev.recorder(
-                    samplerate=config.SAMPLE_RATE,
-                    channels=mic_ch,
-                    blocksize=config.BLOCK_FRAMES,
-                ) as mic_rec,
-                loop_dev.recorder(
-                    samplerate=config.SAMPLE_RATE,
-                    channels=loop_ch,
-                    blocksize=config.BLOCK_FRAMES,
-                ) as loop_rec,
-            ):
-                capture_loop(
-                    mic_rec,
-                    loop_rec,
-                    stop_event,
-                    chunks,
-                    chunk_lock,
-                    live_mono_chunk_callback,
+        # マイクストリームを開く
+        mic_stream = pa.open(
+            format=pyaudio.paInt16,
+            channels=mic_channels,
+            rate=config.SAMPLE_RATE,
+            input=True,
+            frames_per_buffer=config.BLOCK_FRAMES,
+            input_device_index=mic_index,
+        )
+
+        # ループバックストリームを開く
+        if loopback_info is not None:
+            try:
+                loopback_channels = int(loopback_info["maxInputChannels"])
+                loopback_rate = int(
+                    loopback_info.get("defaultSampleRate", config.SAMPLE_RATE)
                 )
+                loopback_block_frames = (
+                    int(config.BLOCK_FRAMES * loopback_rate / config.SAMPLE_RATE)
+                    if loopback_rate != config.SAMPLE_RATE
+                    else config.BLOCK_FRAMES
+                )
+                loopback_stream = pa.open(
+                    format=pyaudio.paInt16,
+                    channels=loopback_channels,
+                    rate=loopback_rate,
+                    input=True,
+                    frames_per_buffer=loopback_block_frames,
+                    input_device_index=int(loopback_info["index"]),
+                )
+                print(
+                    f"[audio] ループバック: {loopback_info.get('name', '?')} "
+                    f"({loopback_channels}ch, {loopback_rate}Hz)",
+                    flush=True,
+                )
+            except Exception as e:
+                print(
+                    f"[audio] ループバックストリームの開設に失敗しました: {e}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                loopback_stream = None
+                loopback_channels = 0
         else:
             print(
-                "ループバックが見つかりません。PC 音なしでマイクのみ録音します。",
+                "[audio] ループバックデバイスが見つかりません。マイクのみで録音します。",
                 file=sys.stderr,
+                flush=True,
             )
-            with mic_dev.recorder(
-                samplerate=config.SAMPLE_RATE,
-                channels=mic_ch,
-                blocksize=config.BLOCK_FRAMES,
-            ) as mic_rec:
-                capture_loop(
-                    mic_rec,
-                    None,
-                    stop_event,
-                    chunks,
-                    chunk_lock,
-                    live_mono_chunk_callback,
-                )
+
+        capture_loop(
+            mic_stream,
+            loopback_stream,
+            mic_channels,
+            loopback_channels,
+            loopback_rate,
+            stop_event,
+            chunks,
+            chunk_lock,
+            live_mono_chunk_callback,
+        )
+
     except Exception as e:
-        print(f"録音エラー: {e}", file=sys.stderr)
+        print(f"[audio] 録音エラー: {e}", file=sys.stderr, flush=True)
         error_slot[0] = str(e)
     finally:
-        _win32_com_done(com_ok)
+        if mic_stream is not None:
+            try:
+                mic_stream.stop_stream()
+                mic_stream.close()
+            except Exception:  # noqa: BLE001
+                pass
+        if loopback_stream is not None:
+            try:
+                loopback_stream.stop_stream()
+                loopback_stream.close()
+            except Exception:  # noqa: BLE001
+                pass
+        pa.terminate()
 
 
 def write_wave_file(

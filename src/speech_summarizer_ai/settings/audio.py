@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-# SoundCard / WASAPI は 48 kHz で安定しやすい。
+# WASAPI は 48 kHz で安定しやすい。
 SAMPLE_RATE: int = 48_000
 
 # int16 PCM の 1 サンプルあたりのバイト数。
