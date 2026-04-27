@@ -1,7 +1,10 @@
 """起動時に STT 不足分と必要なら Foundry LLM を取得する。
 
-LLM 取得ダイアログの要否は **ディスク上の ONNX 重みの有無のみ**（``paths.foundry_llm_model_weights_present``）
-で決め、Foundry SDK での load 試行は行わない。
+LLM 取得ダイアログの要否は **3 ステップのファイル存在確認** のみで決め、Foundry SDK での load 試行は行わない。
+
+1. ``models/llm/.speech_summarizer_llm_probe_ok`` の有無
+2. マーカー 2 行目の解決済みモデル ID 読み取り
+3. ``models/llm/`` 以下の対応パスに ``model.onnx`` が存在するか
 """
 
 from __future__ import annotations
@@ -58,13 +61,16 @@ def _format_bytes(n: int) -> str:
 
 
 def _needs_foundry_llm_download_at_startup(project_root: Path) -> bool:
-    """``models/llm`` に設定エイリアスに対応する ONNX 重みがあるか **ファイルだけ** で判定する。
+    """LLM モデルが揃っているか **3 ステップのファイル存在確認** のみで判定する。
 
-    Foundry Local の import / load は行わない（環境差で load 失敗しても、ファイルがあればダイアログを出さない）。
+    Foundry SDK の import / load は行わない。
 
-    - ``FOUNDRY_LLM_CACHE_IN_PROJECT`` が False: プロジェクト側 ``models/llm`` を使わないためダイアログ不要。
-    - 重みあり: ダイアログ不要。
-    - 重みなし: 取得 UI を出せるのは SDK が import 可能なときのみ（ダウンロード処理のため）。
+    ステップ 1: ``FOUNDRY_LLM_CACHE_IN_PROJECT`` が False → プロジェクト側を使わないためダイアログ不要。
+    ステップ 2: ``models/llm/.speech_summarizer_llm_probe_ok`` が無い → 未ダウンロード。
+    ステップ 3: マーカー 2 行目の解決済みモデル ID（例: ``Phi-4-mini-instruct-generic-gpu:5``）が
+               設定エイリアス（``FOUNDRY_LLM_MODEL_ALIAS``）の前方一致（大文字小文字無視）を満たし、
+               かつ ``models/llm/`` 以下の対応パスに ``model.onnx`` があるか。
+               両方 OK → ダイアログ不要。いずれか NG → 再取得が必要。
 
     Args:
         project_root (Path): モデル配置の基準パス（``models/llm`` の親）。
@@ -72,10 +78,26 @@ def _needs_foundry_llm_download_at_startup(project_root: Path) -> bool:
     Returns:
         bool: 起動時に LLM 取得 UI を表示するなら True。
     """
+    # ステップ 1: プロジェクト外キャッシュ設定ならスキップ
     if not config.FOUNDRY_LLM_CACHE_IN_PROJECT:
         return False
+
+    # ステップ 2: probe marker ファイルの存在確認
+    if not paths.foundry_llm_probe_marker_path(project_root).is_file():
+        return foundry_sdk_importable()
+
+    # ステップ 3: marker 2 行目の解決済みモデル ID でディレクトリ存在確認
     alias = config.FOUNDRY_LLM_MODEL_ALIAS
-    if paths.foundry_llm_model_weights_present(project_root, alias):
+    resolved_id = paths.read_llm_resolved_id(project_root, alias)
+    if not resolved_id:
+        # marker はあるが 2 行目が空、またはエイリアス不一致 → 再取得
+        return foundry_sdk_importable()
+    # resolved_id が現在のエイリアスから始まるか確認（大文字小文字区別なし）。
+    # 例: alias="phi-4-mini", resolved_id="Phi-4-mini-instruct-generic-gpu:5" → OK
+    # エイリアスが変更されたとき古いマーカーを誤って有効と判定しないための安全弁。
+    if not resolved_id.lower().startswith(alias.lower()):
+        return foundry_sdk_importable()
+    if paths.foundry_llm_model_onnx_present(project_root, resolved_id):
         return False
     return foundry_sdk_importable()
 
@@ -505,9 +527,9 @@ class StartupModelsSetupDialog(QDialog):
 
 
 def run_startup_models_setup_if_needed(project_root: Path) -> bool:
-    """``models/stt`` と ``models/llm``（設定時）を **ファイルの有無** で検査する。
+    """``models/stt`` と ``models/llm``（設定時）をファイル存在のみで検査する。
 
-    LLM は ``foundry_llm_model_weights_present`` のみで不足判定し、起動時に Foundry で load 試行はしない。
+    LLM は probe marker + 解決済み ID + ディレクトリ存在の 3 ステップで判定し、起動時に Foundry で load 試行はしない。
     不足分だけダイアログで取得し、揃えばすぐメインへ。
 
     Args:
