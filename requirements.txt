@@ -1,46 +1,22 @@
-# -----------------------------------------------------------------------------
-# Speech Summarizer AI — 動作確認済みの依存バージョン固定 (Windows 向けスナップショット)
-#
-# - 抽象的な依存宣言は pyproject.toml を参照してください。
-# - 本ファイルは再現性のあるインストール用の lock として維持しています。
-# - Python 3.11 / Windows 10+ で検証済み。
-# -----------------------------------------------------------------------------
-
-# --- Qt / UI -----------------------------------------------------------------
 PySide6==6.9.0
 PySide6_Addons==6.9.0
 PySide6_Essentials==6.9.0
 shiboken6==6.9.0
-
-# --- Windows ストレージ (WinRT ApplicationData / ユーザーデータルート) -------
-# platform_utils.paths.project_root() が MSIX 等で local_folder を解決するために使用。
-# 未パッケージ EXE では WinRT が使えず LOCALAPPDATA にフォールバックするが、依存は同梱してよい。
 winrt-runtime==3.2.1
 winrt-Windows.Storage==3.2.1
-
-# --- 数値計算 / 音声 ---------------------------------------------------------
 numpy==2.4.2
 PyAudioWPatch>=0.2.12
 webrtcvad-wheels>=2.0.14
-
-# --- STT (faster-whisper) ---------------------------------------------------
 ctranslate2>=4.0.0
 faster-whisper==1.2.1
 huggingface-hub>=0.28.0
 httpx==0.28.1
 tqdm==4.67.3
-
-# --- LLM (Foundry Local, Windows WinML) -------------------------------------
-# foundry-local-sdk-winml 1.0.0 が openai>=2.24.0 を要求する。
 openai>=2.24.0
 foundry-local-sdk-winml==1.0.0
 foundry-local-core-winml==1.0.0
-
-# --- PyInstaller (EXE ビルド時のみ必要) --------------------------------------
 pyinstaller==6.19.0
 pyinstaller-hooks-contrib==2026.1
-
-# --- 推移依存 (明示 pin で再現性を担保) --------------------------------------
 altgraph==0.17.5
 annotated-types==0.7.0
 anyio==4.12.1
