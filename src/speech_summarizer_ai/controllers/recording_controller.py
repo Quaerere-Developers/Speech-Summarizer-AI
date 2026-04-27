@@ -81,7 +81,7 @@ class RecordingController(QObject):
         self._stt_stop_event: threading.Event | None = None
         self._stt_finish_generation: int = 0
         self._stt_folder_lock = threading.Lock()
-        self._live_stt_folder_name: str = config.STT_MODEL_OPTIONS[0][0]
+        self._live_stt_folder_name: str = config.STT_DEFAULT_MODEL
 
         self._recording_meeting_id: int | None = None
         self._foundry_summarizer: FoundryLocalSummarizer | None = None

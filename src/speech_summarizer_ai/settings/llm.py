@@ -11,7 +11,7 @@ FOUNDRY_LLM_APP_NAME: str = "Speech-Summarizer-AI"
 # 要約モデルのカタログ別名（短いファミリー名）。SDK が EP に合わせて完全 ID に解決する。
 # load 時は ``.speech_summarizer_llm_probe_ok`` の記録 → この別名 → カタログの同族 ID の順で試す。
 # 固定したいときだけ ``"...-instruct-generic-gpu:4"`` のような完全 ID を書く。
-FOUNDRY_LLM_MODEL_ALIAS: str = "qwen2.5-0.5b"
+FOUNDRY_LLM_MODEL_ALIAS: str = "phi-4-mini"
 
 # ``True`` なら ``models/llm`` をキャッシュにし起動時に ONNX を検査。``False`` は SDK 既定キャッシュ。
 FOUNDRY_LLM_CACHE_IN_PROJECT: bool = True
