@@ -301,6 +301,48 @@ def foundry_llm_model_weights_present(project_root: Path, model_alias: str) -> b
     return False
 
 
+def _llm_tree_contains_model_onnx(dir_path: Path) -> bool:
+    """``dir_path`` 直下またはその配下に ``model.onnx`` があるか。"""
+    try:
+        if (dir_path / "model.onnx").is_file():
+            return True
+        for p in dir_path.rglob("model.onnx"):
+            if p.is_file():
+                return True
+    except OSError:
+        pass
+    return False
+
+
+def foundry_llm_model_onnx_present(project_root: Path, resolved_id: str) -> bool:
+    """``models/llm`` 以下で resolved_id に対応するパスに ``model.onnx`` があるか。
+
+    Args:
+        project_root: リポジトリルート。
+        resolved_id: マーカー 2 行目の解決済みモデル ID。
+
+    Returns:
+        bool: 名前が一致するディレクトリのいずれかに ``model.onnx`` があれば ``True``。
+    """
+    root = foundry_llm_cache_directory(project_root)
+    if not root.is_dir():
+        return False
+    rid = resolved_id.strip()
+    if not rid:
+        return False
+    prefix = rid.split(":", 1)[0] if ":" in rid else rid
+    for candidate in root.rglob("*"):
+        try:
+            if not candidate.is_dir():
+                continue
+            if rid in candidate.name or prefix in candidate.name:
+                if _llm_tree_contains_model_onnx(candidate):
+                    return True
+        except OSError:
+            continue
+    return False
+
+
 def foundry_llm_resolved_weights_present(project_root: Path, resolved_id: str) -> bool:
     """``models/llm`` 配下に、マーカー 2 行目の解決済み ID に対応する ONNX があるか。
 

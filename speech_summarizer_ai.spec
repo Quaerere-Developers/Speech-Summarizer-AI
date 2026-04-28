@@ -17,7 +17,7 @@
 ビルドは **本リポジトリ用の仮想環境** で行い、``webrtcvad-wheels`` が ``import webrtcvad`` できること
 （``requirements.txt`` / ``pip install -e .``）を確認してください。別プロジェクトの venv だと hook が失敗します。
 
-``scripts/pyinstaller_hooks`` を ``hookspath`` で先に渡し、contrib の ``hook-webrtcvad`` より
+``packaging/pyinstaller_hooks`` を ``hookspath`` で先に渡し、contrib の ``hook-webrtcvad`` より
 リポジトリ同梱の hook を優先します。
 """
 from __future__ import annotations
@@ -30,7 +30,7 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules
 _block_cipher = None
 _root = Path(SPECPATH)
 _icon_path = _root / "resources" / "icons" / "app.ico"
-_pyi_hooks = _root / "scripts" / "pyinstaller_hooks"
+_pyi_hooks = _root / "packaging" / "pyinstaller_hooks"
 
 datas: list[tuple[str, str]] = []
 if (_root / "resources").is_dir():
@@ -104,7 +104,6 @@ _hiddenimports = [
     "speech_summarizer_ai.ui.theme.qss.components",
     "speech_summarizer_ai.platform_utils.single_instance",
     "speech_summarizer_ai.platform_utils.paths",
-    "speech_summarizer_ai.platform_utils.compat_numpy",
     "speech_summarizer_ai.settings",
     "speech_summarizer_ai.settings.audio",
     "speech_summarizer_ai.settings.llm",
@@ -123,7 +122,7 @@ _hiddenimports = [
     "speech_summarizer_ai.stt.faster_whisper_engine",
     "speech_summarizer_ai.audio",
     "speech_summarizer_ai.audio.backend",
-    "soundcard",
+    "pyaudiowpatch",
     "webrtcvad",
     "numpy",
     "ctranslate2",
