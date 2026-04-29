@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 
-
 # 一覧カード上の要約プレビューに使う最大文字数。
 LIST_CARD_SUMMARY_PREVIEW_LEN: int = 50
 

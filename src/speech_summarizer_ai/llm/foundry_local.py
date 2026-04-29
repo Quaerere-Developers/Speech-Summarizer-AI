@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import json
+import re
 import sys
 import threading
 import time
+from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -100,6 +103,69 @@ DEFAULT_TITLE_SYSTEM_PROMPT: str = """あなたはビジネス文書・会議記
 - 前置き（「タイトル:」「【」等）は禁止。
 """
 
+DEFAULT_REFINE_SYSTEM_PROMPT: str = """あなたはビジネス文書の要約に熟練したアシスタントです。
+「---既存の要約---」の後に続く要約と、「---追加の文字起こし---」の後に続く会話ログだけを根拠に、1 つの統合要約として書き直してください。
+
+更新ルール:
+- 既存の要約の要点を残し、追加の文字起こしの新情報だけを統合する（既存文をそのまま複数回貼り付けない）。
+- 内容が重複する箇所は 1 つにまとめる。
+- 新しい決定・アクションがあれば追記する。
+
+文体・品質:
+- 丁寧で簡潔なビジネス調（です・ます調）。
+- 箇条書きまたは短い段落。意思決定者が一目で把握できること。
+
+厳守（違反しないこと）:
+- 文字起こしのコピペは禁止。入力にない事実の補完・推測は禁止。
+- 出力は会議内容の要約のみ。挨拶・前置き・作業説明は禁止。
+- 「要約のプロセス」「統合した要約」「会話の継続性」「続きを統合」など、要約作業そのものを説明するメタ文は一切書かない。
+- 同じ一文を 2 回以上書かない。似た言い回しの繰り返しも禁止。
+- 出力は 400 文字以内を目安に。無意味に長くしない。
+- 出力は文末を必ず 「。」「！」「？」 のいずれかで終える。ぶつ切り・文の途中で終えない。
+"""
+
+# ── Map-Reduce 用プロンプト ────────────────────────────────────────────────────
+
+DEFAULT_MAP_EXTRACT_SYSTEM_PROMPT: str = """あなたは会議分析エンジンです。
+会議の文字起こしから、議事録に必要な情報を JSON 形式で抽出してください。
+
+以下の項目は、最終要約で使われる構成（「会話の目的または概要」「合意・決定事項」「未決の論点・リスク」「次のアクション」）に対応させること:
+- 「目的・概要」: purpose_summary と main_topics（論点・話題）
+- 「決定・合意」: decisions
+- 「未決・リスク」: open_issues と risks
+- 「次のアクション」: action_items（担当・期限が分かる場合は記入）
+
+重要:
+- 文章としてきれいに要約しない。情報を削りすぎない。
+- 決定事項・TODO・課題・論点・重要発言を漏らさない。
+- 不明な情報は推測しない。話者名がある場合は保持する。
+- 「高い自信を持って」「誰かが」のような抽象・テンプレ文言は禁止。事実は短い具体文で書く。
+- key_facts / key_quotes は補足用。なくてよい。key_quotes は原文の短い引用のみ。同じ発言の重複はしない。
+- 出力は JSON のみ（コードブロック・前置き・説明文は不要）。
+- JSON は必ず `}` まで完結させる。生成が途中で途切れないよう、配列は重要なものから各15件程度まで、文字列は短文に抑える。改行インデントは省いてコンパクトでもよい。
+- 項目が無い場合は purpose_summary は空文字、配列は [] にする。
+
+出力形式:
+{
+  "chunk_title": "この区間の主題（15字以内）",
+  "purpose_summary": "（ねらい・目的または概要を1〜2文。該当がなければ空文字でよい）",
+  "main_topics": [],
+  "decisions": [{"content": "", "speaker": "", "confidence": "high|medium|low"}],
+  "action_items": [{"task": "", "owner": "", "due_date": "", "confidence": "high|medium|low"}],
+  "open_issues": [],
+  "risks": [],
+  "key_facts": [],
+  "key_quotes": []
+}
+"""
+
+
+_MAP_EXTRACT_RETRY_USER_SUFFIX: str = (
+    "\n\n【再出力の指示】生成がトークン上限で途中終了した場合に備えます。"
+    "インデントは禁止に近いほど省き、各文字列は短文、各配列は重要な順に最大8件まで。"
+    "必ず最後の「}」まで含めた完全な JSON オブジェクト 1 つのみを出力してください。"
+)
+
 
 def _wrap_transcript_for_summary_user_message(transcript_body: str) -> str:
     """要約用 user メッセージ本文を組み立てる（文字起こし区画を明示する）。
@@ -117,6 +183,120 @@ def _wrap_transcript_for_summary_user_message(transcript_body: str) -> str:
         "---文字起こし本文---\n"
         f"{body}"
     )
+
+
+def _wrap_structured_notes_for_summary_user_message(notes_body: str) -> str:
+    """統合済み情報メモを、:data:`DEFAULT_SUMMARY_SYSTEM_PROMPT` 用の user 本文へ載せる。
+
+    ``---文字起こし本文---`` 直下に並ぶテキストは「会話ログ相当の根拠」として扱わせる。
+
+    Args:
+        notes_body: チャンク抽出を種類別に統合し整形したプレーンテキスト。
+
+    Returns:
+        str: ``summarize_transcript`` と同形式の user ロール本文。
+    """
+    body = notes_body.strip()
+    return (
+        "次のセクションは、会議のチャンクごとに抽出し種類別に統合した情報メモです。"
+        "元の文字起こしのすべてが含まれているとは限りませんが、"
+        "あなたのプロフェッショナルな要約の根拠としてこのメモだけを使ってください。\n"
+        "メモの列挙・転記は禁止。同じ引用・決定・タスクを微妙に言い換えて繰り返すこと、"
+        "「高い自信を持って」など同型の抽象表現の連発は禁止。重複は一つにまとめてください。\n\n"
+        "---文字起こし本文---\n"
+        f"{body}"
+    )
+
+
+def _merged_extract_to_plaintext_notes(merged: dict) -> str:
+    """種類別に統合した dict を、要約向けの読みやすい日本語メモにする。
+
+    Args:
+        merged: :func:`_merge_chunk_extracts` の戻り値。
+
+    Returns:
+        str: 空でないセクションのみを含むプレーンテキスト。
+    """
+    lines: list[str] = []
+
+    def _decision_line(d: dict) -> str:
+        txt = str(d.get("content", "") or d.get("decision", "")).strip()
+        if not txt:
+            return ""
+        sp = str(d.get("related_speaker", "") or d.get("speaker", "")).strip()
+        return f"- {txt}" + (f"（{sp}）" if sp else "")
+
+    def _action_line(a: dict) -> str:
+        task = str(a.get("task", "")).strip()
+        if not task:
+            return ""
+        owner = str(a.get("owner", "")).strip()
+        due = str(a.get("due_date", "")).strip()
+        bits = [task]
+        if owner:
+            bits.append(f"担当:{owner}")
+        if due:
+            bits.append(f"期限:{due}")
+        return "- " + " / ".join(bits)
+
+    mt = merged.get("main_topics") or []
+    po = merged.get("purpose_overview") or []
+
+    if po or mt:
+        lines.append("【会話の目的または概要】")
+        for p in po:
+            if str(p).strip():
+                lines.append(f"- {p}")
+        for t in mt:
+            if str(t).strip():
+                lines.append(f"- （話題）{t}")
+        lines.append("")
+
+    decs = merged.get("decisions") or []
+    if decs:
+        lines.append("【合意・決定事項】")
+        for d in decs:
+            if not isinstance(d, dict):
+                continue
+            ln = _decision_line(d)
+            if ln:
+                lines.append(ln)
+        lines.append("")
+
+    actions = merged.get("action_items") or []
+    if actions:
+        lines.append("【次のアクション】")
+        for a in actions:
+            if not isinstance(a, dict):
+                continue
+            ln = _action_line(a)
+            if ln:
+                lines.append(ln)
+        lines.append("")
+
+    ois = merged.get("open_issues") or []
+    rs = merged.get("risks") or []
+    if ois or rs:
+        lines.append("【未決の論点・リスク】")
+        for x in ois:
+            if str(x).strip():
+                lines.append(f"- （論点）{x}")
+        for x in rs:
+            if str(x).strip():
+                lines.append(f"- （リスク）{x}")
+        lines.append("")
+
+    for title, key in (
+        ("【補足：重要な事実】", "key_facts"),
+        ("【補足：注目発言】", "key_quotes"),
+    ):
+        rows = merged.get(key) or []
+        if rows:
+            lines.append(title)
+            lines.extend(f"- {r}" for r in rows if str(r).strip())
+            lines.append("")
+
+    return "\n".join(lines).strip()
 
 
 def _looks_like_transcript_echo(summary: str, raw_transcript: str) -> bool:
@@ -138,6 +318,133 @@ def _looks_like_transcript_echo(summary: str, raw_transcript: str) -> bool:
         return False
     if len(s) >= int(len(r) * 0.92) and s[:120] == r[:120]:
         return True
+    return False
+
+
+def _split_sentences_ja(text: str) -> list[str]:
+    """日本語本文を文末記号でおおまかに文に分割する（繰り返し検出用）。
+
+    Args:
+        text: プレーンテキスト。
+
+    Returns:
+        list[str]: 空でない文の列（記号は各要素末尾に含まれる場合あり）。
+    """
+    t = text.strip()
+    if not t:
+        return []
+    parts = re.split(r"(?<=[。．!?？！])\s*", t)
+    return [p.strip() for p in parts if len(p.strip()) >= 8]
+
+
+def _dedupe_consecutive_sentences(text: str) -> str:
+    """連続して同一の文が並んでいる場合、1 つだけ残す。
+
+    モデルが同一文を「。」区切りで連結した場合に後処理で軽減する。
+
+    Args:
+        text: 生のモデル出力。
+
+    Returns:
+        str: 連続重複を除いたテキスト。
+    """
+    sents = _split_sentences_ja(text)
+    if len(sents) < 2:
+        return text.strip()
+    deduped: list[str] = []
+    for s in sents:
+        if deduped and deduped[-1] == s:
+            continue
+        deduped.append(s)
+    return "".join(deduped)
+
+
+def _strip_incomplete_trailing_sentence(text: str) -> str:
+    """文末記号のない末尾（入力トークン上限で途中打ち切られた断片）を取り除く。
+
+    「。」「！」「？」などで終わる部分だけを残し、ぶつ切りの末尾は捨てる。
+    文末記号が一度も無ければ空文字を返す。
+
+    Args:
+        text: モデル出力または後処理済みテキスト。
+
+    Returns:
+        str: 完成した文のみを連結したテキスト。
+    """
+    t = text.strip()
+    if not t:
+        return ""
+    if re.search(r"[。．!?？！]\s*$", t):
+        return t
+    last_end: int | None = None
+    for m in re.finditer(r"[。．!?？！]", t):
+        last_end = m.end()
+    if last_end is None:
+        return ""
+    return t[:last_end].strip()
+
+
+def _finalize_refine_segment(text: str) -> str:
+    """Refine の 1 セグメントとして採用する前に適用する整形。
+
+    Args:
+        text: モデル出力。
+
+    Returns:
+        str: 連続重複除去後、未完の末尾を除いたテキスト。
+    """
+    return _strip_incomplete_trailing_sentence(_dedupe_consecutive_sentences(text))
+
+
+def _has_excessive_repetition(
+    text: str, *, threshold: float = 0.45, min_line_len: int = 15
+) -> bool:
+    """テキスト内に同一フレーズの反復ループがあるかを検出する。
+
+    改行が少ない 1 段落出力でも、文末で分割した文単位の重複を検出する。
+
+    Args:
+        text: 検査対象テキスト。
+        threshold: 非ユニーク行の割合がこれを超えると True（0〜1）。
+        min_line_len: 重複判定に含める最短行長（文字数）。短すぎる行は除外。
+
+    Returns:
+        bool: 過剰な繰り返しがあれば True。
+    """
+    stripped = text.strip()
+    if not stripped:
+        return False
+
+    lines = [
+        ln.strip() for ln in stripped.splitlines() if len(ln.strip()) >= min_line_len
+    ]
+    if len(lines) >= 3:
+        repetition_rate = 1.0 - len(set(lines)) / len(lines)
+        if repetition_rate > threshold:
+            return True
+
+    sents = _split_sentences_ja(stripped)
+    if len(sents) >= 4:
+        uniq = len(set(sents))
+        if uniq / len(sents) < 0.42:
+            return True
+
+    run = 1
+    max_run = 1
+    for i in range(1, len(sents)):
+        if sents[i] == sents[i - 1]:
+            run += 1
+            max_run = max(max_run, run)
+        else:
+            run = 1
+    if max_run >= 3:
+        return True
+
+    if len(sents) >= 6:
+        most_common = Counter(sents).most_common(1)[0][1]
+        if most_common >= 3:
+            return True
+
     return False
 
 
@@ -177,6 +484,37 @@ def _extract_assistant_text_from_complete_chat(
     return ""
 
 
+def _streaming_chat_aggregate(client: Any, messages: list[dict[str, str]]) -> str:
+    """Foundry の ``complete_streaming_chat`` で本文を集約する。
+
+    ストリームが空なら ``complete_chat`` から読み替える。
+
+    Args:
+        client: チャットクライアント（``complete_streaming_chat`` / ``complete_chat`` を実装）。
+        messages: ``role`` と ``content`` を持つメッセージ列。
+
+    Returns:
+        str: assistant の出力テキスト（前後空白除去）。
+    """
+
+    def _delta_content(chunk: Any) -> str | None:
+        try:
+            delta = chunk.choices[0].delta
+            return getattr(delta, "content", None) if delta is not None else None
+        except (IndexError, AttributeError):
+            return None
+
+    parts: list[str] = []
+    for chunk in client.complete_streaming_chat(messages):
+        c = _delta_content(chunk)
+        if c:
+            parts.append(c)
+    text = "".join(parts).strip()
+    if not text:
+        text = _extract_assistant_text_from_complete_chat(client, messages)
+    return text
+
+
 @dataclass(frozen=True)
 class SummarizeResult:
     """要約 1 件分の結果。
@@ -188,6 +526,35 @@ class SummarizeResult:
 
     text: str
     model_alias: str
+
+
+@dataclass
+class ChunkExtract:
+    """Map フェーズで 1 チャンクから抽出した構造化情報。
+
+    Attributes:
+        chunk_index: チャンク番号（0 始まり）。
+        chunk_title: この区間の主題。
+        purpose_summary: この区間の会話の目的・ねらいまたは概要。
+        main_topics: 話題一覧。
+        decisions: 決定事項リスト（各要素は dict）。
+        action_items: アクションアイテムリスト（各要素は dict）。
+        open_issues: 未解決の問題。
+        risks: リスク。
+        key_facts: 重要な事実。
+        key_quotes: 注目すべき発言。
+    """
+
+    chunk_index: int
+    chunk_title: str
+    purpose_summary: str
+    main_topics: list[str]
+    decisions: list[dict]
+    action_items: list[dict]
+    open_issues: list[str]
+    risks: list[str]
+    key_facts: list[str]
+    key_quotes: list[str]
 
 
 def format_transcript_lines(lines: Sequence[tuple[str, str]]) -> str:
@@ -210,6 +577,218 @@ def format_transcript_lines(lines: Sequence[tuple[str, str]]) -> str:
         else:
             parts.append(b)
     return "\n".join(parts)
+
+
+# ── Map-Reduce ヘルパー ────────────────────────────────────────────────────────
+
+
+def _parse_json_from_llm_output(text: str) -> dict:
+    """LLM 出力から JSON オブジェクトを解析する。
+
+    - 先頭の完全なオブジェクトだけ ``JSONDecoder.raw_decode`` で取る（後ろに説明文が付く場合に有効）。
+    - Markdown の `` ```json `` ブロックにも対応する。
+
+    Args:
+        text: モデルの生出力。
+
+    Returns:
+        dict: 解析済み辞書。解析失敗時は空辞書。
+    """
+
+    def _one_object(s: str) -> dict | None:
+        s = s.strip()
+        if not s:
+            return None
+        try:
+            v = json.loads(s)
+            return v if isinstance(v, dict) else None
+        except json.JSONDecodeError:
+            pass
+        i = s.find("{")
+        if i == -1:
+            return None
+        dec = json.JSONDecoder()
+        try:
+            obj, _end = dec.raw_decode(s[i:])
+            if isinstance(obj, dict):
+                return obj
+        except json.JSONDecodeError:
+            pass
+        j = s.rfind("}")
+        if j > i:
+            try:
+                v = json.loads(s[i : j + 1])
+                return v if isinstance(v, dict) else None
+            except json.JSONDecodeError:
+                pass
+        return None
+
+    t = text.strip()
+    if not t:
+        return {}
+
+    m = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", t)
+    if m:
+        got = _one_object(m.group(1))
+        if got is not None:
+            return got
+
+    got = _one_object(t)
+    return got if got is not None else {}
+
+
+def _chunk_extract_from_dict(index: int, d: dict) -> ChunkExtract:
+    """辞書から :class:`ChunkExtract` を生成する。キーが不足しても失敗しない。
+
+    Args:
+        index: チャンク番号。
+        d: LLM 出力を解析した辞書。
+
+    Returns:
+        ChunkExtract: 抽出結果。
+    """
+
+    def _str_list(val: object) -> list[str]:
+        if isinstance(val, list):
+            return [str(v) for v in val if v]
+        return []
+
+    def _dict_list(val: object) -> list[dict]:
+        if isinstance(val, list):
+            return [v for v in val if isinstance(v, dict)]
+        return []
+
+    ps = str(d.get("purpose_summary", "") or d.get("purpose_or_overview", "")).strip()
+
+    return ChunkExtract(
+        chunk_index=index,
+        chunk_title=str(d.get("chunk_title", f"チャンク {index + 1}")).strip(),
+        purpose_summary=ps,
+        main_topics=_str_list(d.get("main_topics")),
+        decisions=_dict_list(d.get("decisions")),
+        action_items=_dict_list(d.get("action_items")),
+        open_issues=_str_list(d.get("open_issues")),
+        risks=_str_list(d.get("risks")),
+        key_facts=_str_list(d.get("key_facts")),
+        key_quotes=_str_list(d.get("key_quotes")),
+    )
+
+
+def _merge_chunk_extracts(extracts: list[ChunkExtract]) -> dict:
+    """全チャンクの抽出結果を種類別に統合し重複を除去する（Python のみ・LLM 不使用）。
+
+    Args:
+        extracts: 全チャンクの :class:`ChunkExtract` リスト。
+
+    Returns:
+        dict: 種類別に統合されたデータ。
+            ``purpose_overview`` は各チャンクの ``purpose_summary`` の非重複リスト。
+    """
+
+    def _dedup_str_list(items: list[str]) -> list[str]:
+        seen: set[str] = set()
+        out: list[str] = []
+        for item in items:
+            key = item.strip().lower()
+            if key and key not in seen:
+                seen.add(key)
+                out.append(item.strip())
+        return out
+
+    def _dedup_dict_list(items: list[dict]) -> list[dict]:
+        seen: set[str] = set()
+        out: list[dict] = []
+        for item in items:
+            key = json.dumps(item, ensure_ascii=False, sort_keys=True).lower()
+            if key not in seen:
+                seen.add(key)
+                out.append(item)
+        return out
+
+    return {
+        "purpose_overview": _dedup_str_list(
+            [e.purpose_summary.strip() for e in extracts if e.purpose_summary.strip()]
+        ),
+        "main_topics": _dedup_str_list([t for e in extracts for t in e.main_topics]),
+        "decisions": _dedup_dict_list([d for e in extracts for d in e.decisions]),
+        "action_items": _dedup_dict_list([a for e in extracts for a in e.action_items]),
+        "open_issues": _dedup_str_list([i for e in extracts for i in e.open_issues]),
+        "risks": _dedup_str_list([r for e in extracts for r in e.risks]),
+        "key_facts": _dedup_str_list([f for e in extracts for f in e.key_facts]),
+        "key_quotes": _dedup_str_list([q for e in extracts for q in e.key_quotes]),
+    }
+
+
+def split_transcript_into_chunks(
+    text: str,
+    chunk_size: int,
+    overlap: int,
+) -> list[str]:
+    """文字起こしテキストを改行境界でチャンク分割する（オーバーラップ付き）。
+
+    行の途中では切らず、必ず行末をチャンク境界にする。
+    テキスト全体が ``chunk_size`` 以内に収まる場合は要素 1 つのリストを返す。
+
+    注意: 音声 VAD の無音区間は使わない。文字数と改行のみで分割する。
+
+    Args:
+        chunk_size: 1 チャンクあたりの最大文字数。
+        overlap: 隣接チャンク間のオーバーラップ文字数（文脈の継続性を保つ）。
+            ``chunk_size`` の 1/4 を超える場合は自動的に切り詰める。
+        text: 分割対象テキスト。
+
+    Returns:
+        list[str]: チャンクリスト。空入力は空リスト。
+    """
+    stripped = text.strip()
+    if not stripped:
+        return []
+    safe_overlap = min(overlap, max(chunk_size // 4, 0))
+    lines = stripped.splitlines()
+    chunks: list[str] = []
+    current: list[str] = []
+    current_len = 0
+
+    for line in lines:
+        line_len = len(line) + 1  # +1 for newline
+        if current_len + line_len > chunk_size and current:
+            chunks.append("\n".join(current))
+            # オーバーラップ: 末尾から safe_overlap 文字分の行を引き継ぐ
+            tail: list[str] = []
+            tail_len = 0
+            for prev_line in reversed(current):
+                plen = len(prev_line) + 1
+                if tail_len + plen > safe_overlap:
+                    break
+                tail.insert(0, prev_line)
+                tail_len += plen
+            current = tail + [line]
+            current_len = sum(len(ln) + 1 for ln in current)
+        else:
+            current.append(line)
+            current_len += line_len
+
+    if current:
+        chunks.append("\n".join(current))
+    return chunks
+
+
+def _wrap_refine_user_message(previous_summary: str, new_chunk: str) -> str:
+    """Refine ステップ用の user メッセージを組み立てる。
+
+    Args:
+        previous_summary: 前ステップで生成された要約。
+        new_chunk: 新しい文字起こしチャンク。
+
+    Returns:
+        str: LLM に渡す user ロール本文。
+    """
+    return (
+        "---既存の要約---\n"
+        f"{previous_summary.strip()}\n\n"
+        "---追加の文字起こし---\n"
+        f"{new_chunk.strip()}"
+    )
 
 
 def _wrap_transcript_for_title_user_message(transcript_body: str) -> str:
@@ -616,15 +1195,21 @@ class FoundryLocalSummarizer:
     def unload(self) -> None:
         """ロード済みモデルハンドルをアンロードする。
 
+        SDK の ``unload()`` の後に ``self._model`` を ``None`` にして参照を外す。
+        参照を残すとネイティブ側の重みが解放されても Python ラッパーが掴み続け、
+        プロセスの作業セットが下がりにくい。
+
         Returns:
             None
         """
-        if self._model is not None and self._loaded:
-            try:
-                self._model.unload()
-            except Exception:
-                pass
-            self._loaded = False
+        if self._model is not None:
+            if self._loaded:
+                try:
+                    self._model.unload()
+                except Exception:
+                    pass
+            self._model = None
+        self._loaded = False
 
     def generate_conversation_title(self, transcript: str) -> str:
         """文字起こしから一覧表示用の短いタイトルを生成する。
@@ -831,6 +1416,322 @@ class FoundryLocalSummarizer:
             flush=True,
         )
         return self.summarize_transcript(body, **kwargs)
+
+    def summarize_transcript_refine(
+        self,
+        transcript: str,
+        *,
+        chunk_size: int | None = None,
+        chunk_overlap: int | None = None,
+    ) -> SummarizeResult:
+        """Refine 方式（分割要約）で文字起こしを要約する。
+
+        文字起こし全文をチャンクに分割し、前の要約を引き継ぎながら逐次的に要約を更新する。
+        チャンクが 1 つ（全文が ``chunk_size`` 以内）の場合は :meth:`summarize_transcript` に委譲する。
+
+        Refine フロー::
+
+            chunk₁ → 要約₁
+            [要約₁ + chunk₂] → 要約₂
+            …
+            [要約ₙ₋₁ + chunkN] → 最終要約
+
+        Args:
+            transcript: 文字起こしテキスト。
+            chunk_size: 1 チャンクあたりの最大文字数。``None`` のとき設定値を使う。
+            chunk_overlap: チャンク間オーバーラップ文字数。``None`` のとき設定値を使う。
+
+        Returns:
+            SummarizeResult: 最終要約とモデル別名。
+
+        Raises:
+            RuntimeError: モデル未ロードの場合。
+        """
+        if not self._loaded or self._model is None:
+            raise RuntimeError(
+                "モデルが未ロードです。先に load_model() を呼び出してください。"
+            )
+
+        raw = transcript.strip()
+        if not raw:
+            return SummarizeResult(text="", model_alias=self._model_alias)
+
+        cs = (
+            chunk_size
+            if chunk_size is not None
+            else config.FOUNDRY_LLM_REFINE_CHUNK_SIZE
+        )
+        co = (
+            chunk_overlap
+            if chunk_overlap is not None
+            else config.FOUNDRY_LLM_REFINE_CHUNK_OVERLAP
+        )
+
+        chunks = split_transcript_into_chunks(raw, cs, co)
+
+        # 全文が 1 チャンクに収まる場合は通常の一括要約に委譲（未完文末も除去）
+        if len(chunks) <= 1:
+            one = self.summarize_transcript(raw)
+            return SummarizeResult(
+                text=_finalize_refine_segment(one.text),
+                model_alias=one.model_alias,
+            )
+
+        print(
+            f"[summarize] Refine: {len(chunks)} chunks "
+            f"(chunk_size={cs}, overlap={co}, total_chars={len(raw)})",
+            flush=True,
+        )
+
+        # Step 1: 最初のチャンクを通常の要約で処理
+        current_summary = _finalize_refine_segment(
+            self.summarize_transcript(chunks[0]).text
+        )
+        print(
+            f"[summarize] Refine: chunk 1/{len(chunks)} done "
+            f"(summary_chars={len(current_summary)})",
+            flush=True,
+        )
+
+        def _delta_content(chunk: Any) -> str | None:
+            try:
+                delta = chunk.choices[0].delta
+                return getattr(delta, "content", None) if delta is not None else None
+            except (IndexError, AttributeError):
+                return None
+
+        client = self._model.get_chat_client()
+        # Refine ステップ専用の設定:
+        # - max_tokens: 小さすぎると句点手前で打ち切られる（設定: FOUNDRY_LLM_REFINE_MAX_TOKENS）
+        # - temperature: 決定論的ループ緩和
+        client.settings.max_tokens = config.FOUNDRY_LLM_REFINE_MAX_TOKENS
+        client.settings.temperature = max(self._temperature, 0.5)
+        try:
+            if hasattr(client.settings, "top_p"):
+                client.settings.top_p = 0.92
+        except Exception:  # noqa: BLE001
+            pass
+        # 繰り返しペナルティを SDK が対応していれば設定する
+        for _attr, _val in (("repetition_penalty", 1.15), ("frequency_penalty", 0.6)):
+            try:
+                if hasattr(client.settings, _attr):
+                    setattr(client.settings, _attr, _val)
+                    break
+            except Exception:  # noqa: BLE001
+                pass
+
+        # Step 2〜N: 前の要約 + 新チャンク → 更新要約
+        for i, chunk in enumerate(chunks[1:], start=2):
+            messages: list[dict[str, str]] = [
+                {"role": "system", "content": DEFAULT_REFINE_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": _wrap_refine_user_message(current_summary, chunk),
+                },
+            ]
+            parts: list[str] = []
+            for stream_chunk in client.complete_streaming_chat(messages):
+                c = _delta_content(stream_chunk)
+                if c:
+                    parts.append(c)
+            text = "".join(parts).strip()
+            if not text:
+                text = _extract_assistant_text_from_complete_chat(client, messages)
+            finalized = _finalize_refine_segment(text)
+
+            bad = _has_excessive_repetition(finalized) or _looks_like_transcript_echo(
+                finalized, chunk
+            )
+            if bad:
+                print(
+                    f"[summarize] Refine: chunk {i}/{len(chunks)} - "
+                    "低品質出力（繰り返しまたは文字起こしのコピー）を検出。このチャンクをスキップし前の要約を維持します。",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            elif finalized:
+                current_summary = finalized
+
+            print(
+                f"[summarize] Refine: chunk {i}/{len(chunks)} done "
+                f"(summary_chars={len(current_summary)})",
+                flush=True,
+            )
+
+        return SummarizeResult(
+            text=_finalize_refine_segment(current_summary),
+            model_alias=self._model_alias,
+        )
+
+    def summarize_transcript_map_reduce(
+        self,
+        transcript: str,
+        *,
+        chunk_size: int | None = None,
+        on_progress: Callable[[str], None] | None = None,
+    ) -> SummarizeResult:
+        """構造化 Map-Reduce 方式で文字起こし全文を要約する。
+
+        3 段階パイプライン:
+
+        - **Phase 1 (Map)**: 各チャンクから構造化 JSON を抽出。
+        - **Phase 2 (Merge)**: 種類別に統合・重複排除（Python のみ）。
+        - **Phase 3 (Write)**: 統合メモを ``self._system_prompt``（既定は :data:`DEFAULT_SUMMARY_SYSTEM_PROMPT`）で要約し、最終本文を生成。
+
+        Args:
+            transcript: 文字起こし全文。
+            chunk_size: 1 チャンクの最大文字数。``None`` で設定値を使用。
+            on_progress: 進捗テキストを受け取るコールバック。
+
+        Returns:
+            SummarizeResult: 最終議事録と使用モデル別名。
+        """
+        if not self._loaded or self._model is None:
+            raise RuntimeError(
+                "モデルが未ロードです。先に load_model() を呼び出してください。"
+            )
+
+        raw = transcript.strip()
+        if not raw:
+            return SummarizeResult(text="", model_alias=self._model_alias)
+
+        _size = chunk_size or config.FOUNDRY_LLM_MAP_CHUNK_SIZE
+        chunks = split_transcript_into_chunks(raw, chunk_size=_size, overlap=0)
+        if not chunks:
+            return SummarizeResult(text="", model_alias=self._model_alias)
+
+        client = self._model.get_chat_client()
+        extracts: list[ChunkExtract] = []
+        total = len(chunks)
+
+        # ── Phase 1: Map（各チャンクから JSON 抽出）────────────────────────────
+        for idx, chunk in enumerate(chunks):
+            if on_progress:
+                on_progress(f"[Map-Reduce] 情報抽出中 … チャンク {idx + 1}/{total}")
+            print(
+                f"[map-reduce] extract chunk {idx + 1}/{total} ({len(chunk)} chars)",
+                flush=True,
+            )
+
+            client.settings.max_tokens = config.FOUNDRY_LLM_MAP_EXTRACT_MAX_TOKENS
+            client.settings.temperature = 0.1
+
+            user_msg = f"会議文字起こし:\n{chunk.strip()}"
+            extract_messages: list[dict[str, str]] = [
+                {"role": "system", "content": DEFAULT_MAP_EXTRACT_SYSTEM_PROMPT},
+                {"role": "user", "content": user_msg},
+            ]
+            try:
+                raw_text = _streaming_chat_aggregate(client, extract_messages)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[map-reduce] extract error chunk {idx + 1}: {exc}", flush=True)
+                extracts.append(
+                    ChunkExtract(
+                        chunk_index=idx,
+                        chunk_title=f"チャンク {idx + 1}",
+                        purpose_summary="",
+                        main_topics=[],
+                        decisions=[],
+                        action_items=[],
+                        open_issues=[],
+                        risks=[],
+                        key_facts=[],
+                        key_quotes=[],
+                    )
+                )
+                continue
+
+            parsed = _parse_json_from_llm_output(raw_text)
+            if not parsed:
+                tail = raw_text[-200:] if len(raw_text) > 200 else raw_text
+                print(
+                    f"[map-reduce] JSON parse failed chunk {idx + 1} "
+                    f"(len chars={len(raw_text)}):\n"
+                    f"  head={raw_text[:160]!r}\n"
+                    f"  tail={tail!r}",
+                    flush=True,
+                )
+                client.settings.max_tokens = (
+                    config.FOUNDRY_LLM_MAP_EXTRACT_RETRY_MAX_TOKENS
+                )
+                retry_user = user_msg.strip() + _MAP_EXTRACT_RETRY_USER_SUFFIX
+                retry_messages: list[dict[str, str]] = [
+                    {"role": "system", "content": DEFAULT_MAP_EXTRACT_SYSTEM_PROMPT},
+                    {"role": "user", "content": retry_user},
+                ]
+                print(
+                    f"[map-reduce] extract retry chunk {idx + 1} "
+                    f"(max_tokens={config.FOUNDRY_LLM_MAP_EXTRACT_RETRY_MAX_TOKENS})",
+                    flush=True,
+                )
+                try:
+                    raw_text = _streaming_chat_aggregate(client, retry_messages)
+                    parsed = _parse_json_from_llm_output(raw_text)
+                    if parsed:
+                        print(
+                            f"[map-reduce] JSON parse recovered chunk {idx + 1} after retry.",
+                            flush=True,
+                        )
+                except Exception as exc2:  # noqa: BLE001
+                    print(
+                        f"[map-reduce] extract retry error chunk {idx + 1}: {exc2}",
+                        flush=True,
+                    )
+
+            if not parsed:
+                print(
+                    f"[map-reduce] JSON still empty after retry chunk {idx + 1}.",
+                    flush=True,
+                )
+            extracts.append(_chunk_extract_from_dict(idx, parsed))
+
+        # ── Phase 2: Merge（Python による種類別統合・重複排除）─────────────────
+        if on_progress:
+            on_progress("[Map-Reduce] 情報を統合中 …")
+        merged = _merge_chunk_extracts(extracts)
+        notes_plain = _merged_extract_to_plaintext_notes(merged)
+
+        if not notes_plain.strip():
+            print(
+                "[map-reduce] 統合メモが空のため一括要約にフォールバックします。",
+                flush=True,
+            )
+            fb = self.summarize_transcript(raw)
+            return SummarizeResult(
+                text=_finalize_refine_segment(fb.text),
+                model_alias=self._model_alias,
+            )
+
+        # ── Phase 3: Write（要約 system プロンプトで最終本文を生成）────────────
+        if on_progress:
+            on_progress("[Map-Reduce] 最終議事録を生成中 …")
+        print("[map-reduce] write final summary", flush=True)
+
+        client.settings.max_tokens = config.FOUNDRY_LLM_MAP_WRITE_MAX_TOKENS
+        client.settings.temperature = self._temperature
+
+        write_user_msg = _wrap_structured_notes_for_summary_user_message(notes_plain)
+        write_messages: list[dict[str, str]] = [
+            {"role": "system", "content": self._system_prompt},
+            {"role": "user", "content": write_user_msg},
+        ]
+        write_buf_text = ""
+        try:
+            write_buf_text = _streaming_chat_aggregate(client, write_messages)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[map-reduce] write error: {exc}", flush=True)
+
+        final_text = _finalize_refine_segment(write_buf_text)
+        # 空、または同一フレーズの異常反復なら一括要約（DEFAULT_SUMMARY_SYSTEM_PROMPT 経路）へ
+        if (not final_text.strip()) or _has_excessive_repetition(final_text):
+            print(
+                "[map-reduce] 最終要約が空、または反復異常のため一括要約にフォールバックします。",
+                flush=True,
+            )
+            fb = self.summarize_transcript(raw)
+            final_text = _finalize_refine_segment(fb.text)
+
+        return SummarizeResult(text=final_text, model_alias=self._model_alias)
 
 
 def summarize_transcript_with_foundry_local(

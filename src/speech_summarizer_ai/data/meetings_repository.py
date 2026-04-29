@@ -92,13 +92,11 @@ def list_meetings(project_root: Path) -> list[MeetingListRow]:
         list[MeetingListRow]: 一覧行のリスト。先頭が作成日時が最も新しい行。
     """
     with connect(project_root) as conn:
-        cur = conn.execute(
-            """
+        cur = conn.execute("""
             SELECT id, created_at, title, summary, paragraph_list, progress_status
             FROM meetings
             ORDER BY created_at DESC, id DESC
-            """
-        )
+            """)
         out: list[MeetingListRow] = []
         for row in cur.fetchall():
             summary = str(row["summary"]).strip()

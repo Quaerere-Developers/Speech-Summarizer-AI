@@ -10,9 +10,7 @@ import queue
 import sys
 import threading
 import time
-import wave
 from collections.abc import Callable
-from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -179,19 +177,17 @@ def _process_raw_pair(
     loopback: np.ndarray | None,
     nm: int,
     *,
-    chunks: list[np.ndarray],
-    chunk_lock: threading.Lock,
+    recording_pcm_sink: Callable[[np.ndarray], None] | None,
     live_mono_chunk_callback: Callable[[np.ndarray], None] | None,
 ) -> None:
-    """1 組の生フレームを混合し ``chunks`` に積み、任意でライブ STT に渡す（処理スレッド専用）。
+    """1 組の生フレームを混合し、任意でファイル_sink とライブ STT に渡す（処理スレッド専用）。
 
     Args:
         mic_frames: マイクの float32 配列 shape ``(nm, channels)``。
         loopback: ループバック。無い場合は ``None``。
         nm: マイクフレームのサンプル数。
-        chunks: PCM チャンクのリスト。
-        chunk_lock: ``chunks`` 用ロック。
-        live_mono_chunk_callback: 任意。モノラル int16 を渡す。
+        recording_pcm_sink: 任意。保存が有効なときのみ WAV に書き込む ``int16`` PCM を渡す。
+        live_mono_chunk_callback: 任意。リアルタイム STT 用モノラル int16。
 
     Returns:
         None
@@ -215,8 +211,8 @@ def _process_raw_pair(
         pcm = mono_for_stt
     else:
         pcm = to_stereo_interleaved(mono_m, mono_l)
-    with chunk_lock:
-        chunks.append(pcm)
+    if recording_pcm_sink is not None:
+        recording_pcm_sink(pcm)
     if live_mono_chunk_callback is not None:
         live_mono_chunk_callback(mono_for_stt.copy())
 
@@ -229,14 +225,14 @@ def capture_loop(
     loopback_channels: int,
     loopback_rate: int,
     stop_event: threading.Event,
-    chunks: list[np.ndarray],
-    chunk_lock: threading.Lock,
+    recording_pcm_sink: Callable[[np.ndarray], None] | None,
     live_mono_chunk_callback: Callable[[np.ndarray], None] | None = None,
 ) -> None:
-    """PyAudioWPatch ストリームからマイク（と任意のループバック）を録音し ``chunks`` に積む。
+    """PyAudioWPatch ストリームからマイク（と任意のループバック）を録音する。
 
     マイクは ``mic_open_rate`` で開き、内部で ``config.SAMPLE_RATE`` に揃えてから混合する。
     ループバックはマイク 1 ブロックと同じ時間幅になるようフレーム数を合わせる。
+    録音ファイルへは ``recording_pcm_sink`` でチャンク単位書き込みし、メモリには蓄えない。
 
     Args:
         mic_stream: マイク PyAudio ストリーム。
@@ -246,8 +242,7 @@ def capture_loop(
         loopback_channels: ループバックのチャンネル数。
         loopback_rate: ループバックのサンプルレート（Hz）。
         stop_event: ループ終了用イベント。
-        chunks: PCM チャンクのリスト。
-        chunk_lock: ``chunks`` 用ロック。
+        recording_pcm_sink: 任意。保存が有効なときのみ WAV 用 PCM を渡す。
         live_mono_chunk_callback: 任意。リアルタイム STT 用 int16 モノラル（処理スレッドから呼ぶ）。
 
     Returns:
@@ -280,8 +275,7 @@ def capture_loop(
                     mic_frames,
                     lb,
                     nm,
-                    chunks=chunks,
-                    chunk_lock=chunk_lock,
+                    recording_pcm_sink=recording_pcm_sink,
                     live_mono_chunk_callback=live_mono_chunk_callback,
                 )
             except Exception as e:  # noqa: BLE001
@@ -347,23 +341,22 @@ def capture_loop(
 
 def run_recording_session(
     stop_event: threading.Event,
-    chunks: list[np.ndarray],
-    chunk_lock: threading.Lock,
     error_slot: list[str | None],
     *,
     live_mono_chunk_callback: Callable[[np.ndarray], None] | None = None,
+    recording_pcm_sink: Callable[[np.ndarray], None] | None = None,
 ) -> None:
     """バックグラウンドスレッドから呼び出し、録音セッションを実行する（PyAudioWPatch）。
 
     マイクと WASAPI ループバック（PC 再生音）を同時録音する。
+    PCM はメモリにリスト蓄積せず、``recording_pcm_sink`` があればチャンク単位で渡す。
     終了時に例外があれば ``error_slot[0]`` にメッセージ文字列を格納する。
 
     Args:
         stop_event: 録音ループを止めるイベント。
-        chunks: 録音 PCM チャンクのリスト。
-        chunk_lock: ``chunks`` 用のロック。
         error_slot: 長さ 1 のリスト。エラー時に ``[0]`` に文字列を書き込む。
         live_mono_chunk_callback: 任意。リアルタイム STT 用（``capture_loop`` 参照）。
+        recording_pcm_sink: 任意。ファイル保存が有効なとき WAV 用 PCM（``capture_loop`` 参照）。
 
     Returns:
         None
@@ -391,9 +384,6 @@ def run_recording_session(
         loopback_info = get_loopback_device_info(pa)
         loopback_channels = 0
         loopback_rate = config.SAMPLE_RATE
-
-        with chunk_lock:
-            chunks.clear()
 
         mic_stream = None
         mic_open_rate = config.SAMPLE_RATE
@@ -478,9 +468,8 @@ def run_recording_session(
             loopback_channels,
             loopback_rate,
             stop_event,
-            chunks,
-            chunk_lock,
-            live_mono_chunk_callback,
+            recording_pcm_sink,
+            live_mono_chunk_callback=live_mono_chunk_callback,
         )
 
     except Exception as e:
@@ -500,32 +489,3 @@ def run_recording_session(
             except Exception:  # noqa: BLE001
                 pass
         pa.terminate()
-
-
-def write_wave_file(
-    path: Path,
-    *,
-    chunks: list[np.ndarray],
-    chunk_lock: threading.Lock,
-) -> bool:
-    """蓄積した PCM チャンクを連結して 1 つの WAV ファイルに書き出す。
-
-    Args:
-        path: 出力 WAV ファイルパス。
-        chunks: 連結するチャンクのリスト（空なら書き込まない）。
-        chunk_lock: ``chunks`` 用のロック。
-
-    Returns:
-        bool: データがありファイルを書いた場合 ``True``。データが無ければ ``False``。
-    """
-    with chunk_lock:
-        if not chunks:
-            return False
-        data = np.concatenate(chunks)
-        chunks.clear()
-    with wave.open(str(path), "wb") as wf:
-        wf.setnchannels(config.output_channel_count())
-        wf.setsampwidth(config.SAMPLE_WIDTH)
-        wf.setframerate(config.SAMPLE_RATE)
-        wf.writeframes(data.tobytes())
-    return True
