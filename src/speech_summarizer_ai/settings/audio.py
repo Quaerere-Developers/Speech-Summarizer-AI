@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-# SoundCard / WASAPI は 48 kHz で安定しやすい。
+# WASAPI は 48 kHz で安定しやすい。
 SAMPLE_RATE: int = 48_000
 
 # int16 PCM の 1 サンプルあたりのバイト数。
@@ -24,6 +24,9 @@ MONO_MIC_GAIN: float = 3.5
 
 # モノラル合成時の PC ループバック側ゲイン。
 MONO_PC_GAIN: float = 1.0
+
+# True のとき、録音中にセッション WAV へストリーミング書き込みする。False ではファイルに保存しない。
+SAVE_RECORDED_AUDIO_TO_FILE: bool = False
 
 
 def output_channel_count() -> int:

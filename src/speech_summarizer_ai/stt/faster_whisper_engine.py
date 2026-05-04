@@ -110,7 +110,7 @@ class FastWhisperTranscriber:
 
     def __init__(
         self,
-        model_size: str = "base",
+        model_size: str = config.STT_DEFAULT_MODEL,
         *,
         project_root: Path | None = None,
         use_project_models: bool = True,
@@ -314,7 +314,7 @@ class FastWhisperTranscriber:
 def transcribe_file(
     audio_path: str | Path,
     *,
-    model_size: str = "base",
+    model_size: str = config.STT_DEFAULT_MODEL,
     project_root: Path | None = None,
     use_project_models: bool = True,
     language: str | None = "ja",

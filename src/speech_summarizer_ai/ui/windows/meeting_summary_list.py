@@ -727,7 +727,12 @@ class MeetingSummaryListWindow(QMainWindow):
         self._voice_combo = QComboBox()
         for folder, label in config.STT_MODEL_OPTIONS:
             self._voice_combo.addItem(label, folder)
-        self._voice_combo.setCurrentIndex(0)
+        _folders = [f for f, _ in config.STT_MODEL_OPTIONS]
+        try:
+            _default_idx = _folders.index(config.STT_DEFAULT_MODEL)
+        except ValueError:
+            _default_idx = 0
+        self._voice_combo.setCurrentIndex(_default_idx)
         self._voice_combo.setMinimumWidth(140)
         self._voice_combo.setStyleSheet(lt.combo_qss)
         self._voice_combo.currentIndexChanged.connect(self._on_stt_model_combo_changed)

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import gc
 import queue
 import sys
 import threading
+import wave
 from pathlib import Path
 
 import numpy as np
@@ -72,8 +74,7 @@ class RecordingController(QObject):
 
         self._stop_event = threading.Event()
         self._record_thread: threading.Thread | None = None
-        self._chunks: list[np.ndarray] = []
-        self._chunk_lock = threading.Lock()
+        self._session_audio_path: Path | None = None
         self._record_error: str | None = None
 
         self._live_queue: queue.Queue | None = None
@@ -81,7 +82,7 @@ class RecordingController(QObject):
         self._stt_stop_event: threading.Event | None = None
         self._stt_finish_generation: int = 0
         self._stt_folder_lock = threading.Lock()
-        self._live_stt_folder_name: str = config.STT_MODEL_OPTIONS[0][0]
+        self._live_stt_folder_name: str = config.STT_DEFAULT_MODEL
 
         self._recording_meeting_id: int | None = None
         self._foundry_summarizer: FoundryLocalSummarizer | None = None
@@ -161,6 +162,7 @@ class RecordingController(QObject):
     def _emit_stt_text(self, text: str, t0_sec: float) -> None:
         """STT ワーカースレッドから呼ばれ、認識文をコンソールへ出し DB 追記用シグナルを送る。
 
+        全文トランスクリプトはメモリに保持せず、行単位で SQLite に追記する。
         空文字は無視する。録音中の meeting_id が無い場合はシグナルを送らない。
 
         Args:
@@ -349,8 +351,35 @@ class RecordingController(QObject):
         )
         t.start()
 
+    def _unload_foundry_summarizer_after_job(self) -> None:
+        """要約ジョブ終了後に Foundry LLM をアンロードし参照を外す。
+
+        STT（faster-whisper）は変更しない。プロセス内の Foundry マネージャは SDK 側で残る場合があるが、
+        モデル重みは :meth:`FoundryLocalSummarizer.unload` で解放する。
+
+        Returns:
+            None
+        """
+        with self._foundry_summarizer_lock:
+            s = self._foundry_summarizer
+            if s is None:
+                return
+            try:
+                s.unload()
+            except Exception:  # noqa: BLE001
+                pass
+            self._foundry_summarizer = None
+            gc.collect()
+            print(
+                "[summarize] Foundry Local model unloaded (LLM memory released).",
+                flush=True,
+            )
+
     def _ensure_foundry_summarizer_loaded(self) -> FoundryLocalSummarizer:
-        """キャッシュから要約用 Foundry Local モデルを読み込み、セッション内で再利用する。
+        """この要約ジョブ用に Foundry Local をロードする。
+
+        ジョブ完了後は必ず :meth:`_unload_foundry_summarizer_after_job` で破棄する。
+        次の録音・要約では再度ロードする。STT モデルは別経路のため常時メモリに残りうる。
 
         Returns:
             ロード済みの ``FoundryLocalSummarizer`` インスタンス。
@@ -359,11 +388,9 @@ class RecordingController(QObject):
             if self._foundry_summarizer is not None and getattr(
                 self._foundry_summarizer, "_loaded", False
             ):
-                print("[summarize] Reusing loaded Foundry Local model.", flush=True)
                 return self._foundry_summarizer
             print(
-                "[summarize] Loading Foundry Local model from cache "
-                "(first use in this session)…",
+                "[summarize] Loading Foundry Local model for this summarize job…",
                 flush=True,
             )
             s = FoundryLocalSummarizer(
@@ -464,6 +491,7 @@ class RecordingController(QObject):
                     self._save_dir, meeting_id, ProgressStatus.FAILED
                 )
         finally:
+            self._unload_foundry_summarizer_after_job()
             print(
                 f"[summarize] meeting_id={meeting_id}: done (emit meeting_summarization_finished)",
                 flush=True,
@@ -502,6 +530,8 @@ class RecordingController(QObject):
     def _record_worker(self) -> None:
         """録音スレッドのエントリポイント。``audio_backend.run_recording_session`` を実行する。
 
+        録音ファイルが有効なときは ``wave`` でチャンク単位ストリーミング書き込みする。
+
         Returns:
             None
         """
@@ -514,13 +544,34 @@ class RecordingController(QObject):
         def live_cb(chunk: np.ndarray) -> None:
             q.put(chunk)
 
-        audio_backend.run_recording_session(
-            self._stop_event,
-            self._chunks,
-            self._chunk_lock,
-            slot,
-            live_mono_chunk_callback=live_cb,
-        )
+        wav_out = None
+        audio_path = self._session_audio_path
+        try:
+            if config.SAVE_RECORDED_AUDIO_TO_FILE and audio_path is not None:
+                wav_out = wave.open(str(audio_path), "wb")
+                wav_out.setnchannels(config.output_channel_count())
+                wav_out.setsampwidth(config.SAMPLE_WIDTH)
+                wav_out.setframerate(config.SAMPLE_RATE)
+
+                def recording_sink(pcm: np.ndarray) -> None:
+                    wav_out.writeframes(pcm.tobytes())
+
+                pcm_sink = recording_sink
+            else:
+                pcm_sink = None
+
+            audio_backend.run_recording_session(
+                self._stop_event,
+                slot,
+                live_mono_chunk_callback=live_cb,
+                recording_pcm_sink=pcm_sink,
+            )
+        finally:
+            if wav_out is not None:
+                try:
+                    wav_out.close()
+                except Exception:  # noqa: BLE001
+                    pass
         self._record_error = slot[0]
 
     def toggle_recording(self) -> None:
@@ -555,6 +606,12 @@ class RecordingController(QObject):
                 return
             self._recording_meeting_id = new_mid
             self.recording_meeting_created.emit(new_mid)
+            if config.SAVE_RECORDED_AUDIO_TO_FILE:
+                session_dir, audio_path = paths.new_session_audio_path(self._save_dir)
+                session_dir.mkdir(parents=True, exist_ok=True)
+                self._session_audio_path = audio_path
+            else:
+                self._session_audio_path = None
             self._stop_event.clear()
             self._live_queue = queue.Queue()
             self._stt_stop_event = threading.Event()
@@ -606,29 +663,35 @@ class RecordingController(QObject):
         )
 
     def _finalize_recording_session(self) -> None:
-        """蓄積した録音チャンクをセッション WAV に書き出し、失敗時は警告を出す。
+        """録音停止後の確認。WAV は録音中にストリーミング済み（または保存オフ）。
 
         Returns:
             None
         """
-        session_dir, path = paths.new_session_audio_path(self._save_dir)
-        session_dir.mkdir(parents=True, exist_ok=True)
-        saved = audio_backend.write_wave_file(
-            path,
-            chunks=self._chunks,
-            chunk_lock=self._chunk_lock,
-        )
+        path = self._session_audio_path
+        self._session_audio_path = None
         err = self._record_error
         self._record_error = None
         if err:
             self.message_warning_requested.emit("録音", err)
-        elif not saved:
+            self._apply_meeting_status_after_wav(saved=False, err=err)
+            return
+        if not config.SAVE_RECORDED_AUDIO_TO_FILE:
+            self._apply_meeting_status_after_wav(saved=True, err=None)
+            return
+        # 保存 ON: セッション開始時に決めたパスへ録音スレッドがストリーム書き込み済み
+        saved = (
+            path is not None
+            and path.is_file()
+            and path.stat().st_size > 44  # RIFF WAV ヘッダより大きい
+        )
+        if not saved:
             self.message_warning_requested.emit(
                 "録音",
-                "ファイルが作成されませんでした。\n"
+                "音声ファイルがほぼ空か作成されませんでした。\n"
                 "マイクのアプリ権限（設定）や、既定の録音デバイスを確認してください。",
             )
-        self._apply_meeting_status_after_wav(saved=saved, err=err)
+        self._apply_meeting_status_after_wav(saved=saved, err=None)
 
     def shutdown_for_quit(self) -> None:
         """終了処理用に録音と STT を停止し、関連する状態を片付ける。
@@ -662,3 +725,4 @@ class RecordingController(QObject):
         self._stt_thread = None
         self._stt_stop_event = None
         self._live_queue = None
+        self._unload_foundry_summarizer_after_job()

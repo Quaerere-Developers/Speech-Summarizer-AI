@@ -4,14 +4,16 @@ Speech Summarizer AI アプリケーションです。
 
 ## レイアウト
 
-- `src/speech_summarizer_ai/` — Python パッケージ本体（`settings` / `platform_utils` / `domain` / `data` / `audio` / `stt` / `llm` / `controllers` / `ui`）
-- `resources/icons/` — アプリアイコン（`app.svg` / Windows 用 `app.ico` / `app.png`）。PyInstaller ビルド時に同梱され、EXE にも埋め込まれる
-- `scripts/` — 開発用エントリーポイント（`run_dev.py` など）
-- 実行時データ（SQLite・録音セッション・ローカルモデル）は **`platform_utils.paths.project_root()`** の基準で配置されます。
-  - **Windows:** 通常は `%LOCALAPPDATA%\WEEL\SpeechSummarizerAI\` 直下に `database/`・`sessions/`・`models/` が作成されます（MSIX 等で WinRT の `ApplicationData.local_folder` が使える場合はそちらを優先。未パッケージの EXE では上記にフォールバックします）。
-  - **Windows 以外:** リポジトリルート（`src` の親）直下に同じ名前のフォルダが使われます。
-- `tests/` — テスト
-- `speech_summarizer_ai.spec` — Windows 向け PyInstaller 定義
+- `src/speech_summarizer_ai/` — アプリ本体（`settings` / `platform_utils` / `domain` / `data` / `audio` / `stt` / `llm` / `controllers` / `ui`）。
+- `resources/icons/` — アイコン（`app.svg`、Windows 用 `app.ico` / `app.png`）。PyInstaller で同梱され EXE にも埋め込まれる。
+- `scripts/` — 開発用起動（`run_dev.py` など）。
+- `packaging/` — MSIX 向けマニフェスト・スクリプト、PyInstaller 用 `hook-webrtcvad` など。
+- `pyproject.toml` / `requirements.txt` — 依存関係とパッケージ定義。
+- 実行時データ（SQLite・録音・ローカルモデル）は `platform_utils.paths.project_root()` を基準に置く。
+  - **Windows:** WinRT の `ApplicationData` が使える環境（MSIX 等）ではそのローカルフォルダ。**未パッケージの EXE** などでは `%LOCALAPPDATA%\WEEL\SpeechSummarizerAI\` 直下に `database/`・`sessions/`・`models/` ができる。
+  - **Windows 以外:** リポジトリルート（`src` の親）直下に同じ名前のディレクトリを使う。
+- `tests/` — テスト。
+- `speech_summarizer_ai.spec` — Windows 向け PyInstaller 定義。
 
 ## セットアップと起動
 
@@ -48,7 +50,7 @@ python -m speech_summarizer_ai
 
 前提:
 
-- Windows PC、上記のとおり `requirements.txt` を満たした仮想環境
+- Windows PC、**このリポジトリ用**の仮想環境で `requirements.txt`（または `pip install -e .`）を満たしていること（別プロジェクトの venv だと `webrtcvad` 不足などで PyInstaller の hook が失敗することがあります）
 - リポジトリルートで作業する
 
 手順:
@@ -63,3 +65,5 @@ pyinstaller --noconfirm speech_summarizer_ai.spec
 ```bash
 pyinstaller --noconfirm --clean speech_summarizer_ai.spec
 ```
+
+成果物は **`dist/SpeechSummarizerAI.exe` の 1 ファイル**（onefile）です。初回起動時に展開のため、onedir 版より起動が遅くなることがあります。

@@ -6,12 +6,19 @@ from typing import Literal
 
 # UI に出す選択肢（モデル名, 日本語説明）のタプル。
 STT_MODEL_OPTIONS: tuple[tuple[str, str], ...] = (
-    ("tiny", "最低精度・最高速"),
+    # ("tiny", "最低精度・最高速"),
     ("base", "低精度・高速"),
     ("small", "中精度・中速"),
     ("medium", "高精度・低速"),
     # ("large", "最高精度・最低速"),
 )
+
+# 起動時・UI 未同期時の既定 STT モデル（``STT_MODEL_OPTIONS`` のフォルダ名のいずれか）。
+STT_DEFAULT_MODEL: str = "small"
+if STT_DEFAULT_MODEL not in {f for f, _ in STT_MODEL_OPTIONS}:
+    raise ValueError(
+        f"STT_DEFAULT_MODEL={STT_DEFAULT_MODEL!r} must appear in STT_MODEL_OPTIONS"
+    )
 
 # 推論デバイスの選択肢（型エイリアス）。
 SttDevice = Literal["cpu", "cuda", "auto"]

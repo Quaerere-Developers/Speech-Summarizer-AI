@@ -1,4 +1,4 @@
-"""GUI エントリ。NumPy パッチは ``QApplication`` より前。``RecordingOverlay`` は生成後に import（SoundCard と Qt COM の競合回避）。"""
+"""GUI エントリ。``RecordingOverlay`` は生成後に import（PyAudioWPatch と Qt の初期化順序の問題を回避）。"""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ from speech_summarizer_ai.ui.theme import (
 from speech_summarizer_ai.ui.dialogs.startup_ai_models import (
     run_startup_models_setup_if_needed,
 )
-from speech_summarizer_ai.platform_utils import compat_numpy, paths
+from speech_summarizer_ai.platform_utils import paths
 from speech_summarizer_ai.platform_utils.single_instance import attach_single_instance
 
 
@@ -127,7 +127,6 @@ def main() -> int:
         int: ``QApplication.exec()`` の終了コード。
     """
     _prepare_windows_pyside_dlls()
-    compat_numpy.apply_numpy_patch()
     _set_windows_app_user_model_id()
 
     app = QApplication(sys.argv)

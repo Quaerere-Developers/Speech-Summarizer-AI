@@ -27,6 +27,9 @@ def summarize_meeting_from_paragraphs(
 ) -> MeetingLlmOutcome:
     """``meetings.paragraph_list`` 相当の行からタイトルと要約本文を生成する。
 
+    文字起こし全文を構造化 Map-Reduce 方式（抽出 → 統合 → 生成）で処理する。
+    タイトルは最終要約から生成し、長大な文字起こしを LLM に再送するコストを避ける。
+
     Args:
         project_root: プロジェクトルート。
         meeting_id: 商談 ID。
@@ -38,7 +41,14 @@ def summarize_meeting_from_paragraphs(
     rec = meetings_db.get_meeting(project_root, meeting_id)
     if rec is None:
         return MeetingLlmOutcome(title="", summary="")
+
     body = format_transcript_lines(rec.transcript_lines)
-    title = summarizer.generate_conversation_title(body)
-    summary = summarizer.summarize_transcript(body).text
-    return MeetingLlmOutcome(title=title.strip(), summary=summary)
+
+    # Map-Reduce 方式で要約（抽出 → 統合 → 生成）
+    result = summarizer.summarize_transcript_map_reduce(body)
+
+    # タイトルは最終要約から生成（全文の再送を避けてメモリ効率を高める）
+    title_source = result.text if result.text else body
+    title = summarizer.generate_conversation_title(title_source)
+
+    return MeetingLlmOutcome(title=title.strip(), summary=result.text)
