@@ -10,8 +10,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
 
-from PySide6.QtCore import QSize, Qt, QSettings, QTimer
-from PySide6.QtGui import QColor, QKeySequence, QShortcut
+from PySide6.QtCore import QSize, Qt, QSettings, QTimer, QUrl
+from PySide6.QtGui import QColor, QDesktopServices, QFont, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
@@ -59,9 +59,26 @@ _SUMMARY_EDIT_ICON_SZ = QSize(
 )
 # 要約ツールバー右端と編集ボタンのあいだ
 _SUMMARY_EDIT_BTN_MARGIN_RIGHT_PX = 12
-# 要約／文字起こしタブでメタ行の伸びる幅を一致させる（編集列のレイアウト幅＝ボタン＋右マージン相当）
+# 要約タブのみ：報告と編集のあいだ（報告は編集の左）
+_SUMMARY_REPORT_EDIT_GAP_PX = 12
+_SUMMARY_REPORT_BTN_MIN_WIDTH_PX = 70
+_SUMMARY_REPORT_CAPTION_FONT_PT_DELTA = 2.0
+_SUMMARY_REPORT_ICON_DISPLAY_PX = 24
+_SUMMARY_REPORT_ICON_CANVAS_PX = 28
+_SUMMARY_REPORT_ICON_SZ = QSize(
+    _SUMMARY_REPORT_ICON_DISPLAY_PX, _SUMMARY_REPORT_ICON_DISPLAY_PX
+)
+# 要約／文字起こしタブでメタ行右列の幅を一致（要約＝報告＋隙間＋編集、文字起こし＝スペーサのみ）
 _DETAIL_TOOLBAR_RIGHT_COLUMN_WIDTH_PX = (
-    _SUMMARY_EDIT_BUTTON_MIN_PX + _SUMMARY_EDIT_BTN_MARGIN_RIGHT_PX
+    _SUMMARY_REPORT_BTN_MIN_WIDTH_PX
+    + _SUMMARY_REPORT_EDIT_GAP_PX
+    + _SUMMARY_EDIT_BUTTON_MIN_PX
+    + _SUMMARY_EDIT_BTN_MARGIN_RIGHT_PX
+)
+
+_INAPPROPRIATE_CONTENT_REPORT_FORM_URL = (
+    "https://docs.google.com/forms/d/e/1FAIpQLScNXl7jgO1emgtoG9H5iVDGia-7wvRSg1M0tf1a-mVhFeHQfQ/"
+    "viewform?usp=dialog"
 )
 # 詳細ヘッダ行の上下余白（上をやや多めにしてタップ領域と空気感を確保）
 _HEADER_ROW_VMARGIN_TOP = 14
@@ -185,7 +202,6 @@ class MeetingDetailWidget(QWidget):
         self._next_btn.setToolTip("次の商談")
         for b in (self._prev_btn, self._next_btn):
             b.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._apply_header_nav_buttons_appearance()
         self._prev_btn.clicked.connect(self._on_nav_prev_clicked)
         self._next_btn.clicked.connect(self._on_nav_next_clicked)
         self._prev_btn.setVisible(show_nav)
@@ -206,6 +222,8 @@ class MeetingDetailWidget(QWidget):
         right_ll.addWidget(self._prev_btn)
         right_ll.addSpacing(_HEADER_PREV_NEXT_SPACING)
         right_ll.addWidget(self._next_btn)
+
+        self._apply_header_nav_buttons_appearance()
 
         _header_col_bg = transparent_background_qss()
         for _w in (left_wrap, right_wrap):
@@ -455,12 +473,14 @@ class MeetingDetailWidget(QWidget):
         self._summary_tab.setStyleSheet(
             meeting_detail_shell_background_qss(t.summary_shell_bg)
         )
+        self._apply_report_button()
         self._apply_summary_edit_button_chrome()
         self._summary_edit.setStyleSheet(t.summary_edit_qss)
         self._transcript_tab.setStyleSheet(
             meeting_detail_shell_background_qss(t.transcript_shell_bg)
         )
         self._apply_transcript_scroll_style()
+        self._sync_report_button_appearance()
         self._sync_edit_button_appearance()
         self._rebuild_transcript_rows(self._last_transcript_lines)
 
@@ -548,6 +568,15 @@ class MeetingDetailWidget(QWidget):
         self._summary_meta_label.setStyleSheet(
             meeting_detail_meta_label_qss(t.meta_color)
         )
+        self._report_btn = QPushButton()
+        self._report_btn.setText("報告")
+        self._report_btn.setIconSize(_SUMMARY_REPORT_ICON_SZ)
+        self._report_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        # 動的プロパティ（UI 挙動は不変）— 自動化・補助が「報告」ボタンを識別しやすくする
+        self._report_btn.setProperty("id", "submitReport")
+        self._apply_report_button()
+        self._report_btn.clicked.connect(self._on_report_inappropriate_content_clicked)
+
         self._edit_btn = QPushButton()
         self._edit_btn.setText("")
         self._edit_btn.setIconSize(_SUMMARY_EDIT_ICON_SZ)
@@ -567,6 +596,10 @@ class MeetingDetailWidget(QWidget):
         _edit_col_lay.setContentsMargins(0, 0, 0, 0)
         _edit_col_lay.setSpacing(0)
         _edit_col_lay.addStretch(1)
+        _edit_col_lay.addWidget(
+            self._report_btn, alignment=Qt.AlignmentFlag.AlignVCenter
+        )
+        _edit_col_lay.addSpacing(_SUMMARY_REPORT_EDIT_GAP_PX)
         _edit_col_lay.addWidget(self._edit_btn, alignment=Qt.AlignmentFlag.AlignVCenter)
         tool.addWidget(
             self._summary_edit_toolbar_right, alignment=Qt.AlignmentFlag.AlignVCenter
@@ -583,7 +616,61 @@ class MeetingDetailWidget(QWidget):
         esc = QShortcut(QKeySequence(Qt.Key.Key_Escape), w)
         esc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         esc.activated.connect(self._on_summary_escape_shortcut)
+        self._sync_report_button_appearance()
         return w
+
+    def _apply_report_button(self) -> None:
+        """要約タブ「報告」ボタンの QSS・フォントを一覧カード系スタイルで適用する。
+
+        Returns:
+            None
+        """
+        lt = self._list_header_lt
+        base = list_card_detail_icon_button_qss(
+            lt,
+            transparent=True,
+            padding_px=0,
+            min_side_px=_SUMMARY_EDIT_BUTTON_MIN_PX,
+        )
+        self._report_btn.setFixedHeight(_SUMMARY_EDIT_BUTTON_MIN_PX)
+        cap = QFont(QApplication.font())
+        pt = cap.pointSizeF()
+        if pt <= 0:
+            pt = float(cap.pointSize() if cap.pointSize() > 0 else 10)
+        cap.setPointSizeF(pt + _SUMMARY_REPORT_CAPTION_FONT_PT_DELTA)
+        self._report_btn.setFont(cap)
+        self._report_btn.setStyleSheet(
+            base + f"\nQPushButton {{ color: {lt.card_text}; "
+            f"min-width: {_SUMMARY_REPORT_BTN_MIN_WIDTH_PX}px; padding: 0 4px; }}\n"
+        )
+
+    def _sync_report_button_appearance(self) -> None:
+        """要約タブ「報告」ボタンのメガホンアイコンとツールチップを更新する。
+
+        Returns:
+            None
+        """
+        lt = self._list_header_lt
+        fg = QColor(lt.card_text)
+        fg_dis = list_icon_disabled_muted_on_list_card(lt, base_fg=fg)
+        iz = _SUMMARY_REPORT_ICON_DISPLAY_PX
+        cp = _SUMMARY_REPORT_ICON_CANVAS_PX
+        self._report_btn.setIcon(
+            action_icons.merge_icon_normal_and_disabled_pixmaps(
+                action_icons.icon_report(self._report_btn, color=fg, canvas_px=cp),
+                action_icons.icon_report(self._report_btn, color=fg_dis, canvas_px=cp),
+                iz,
+            )
+        )
+        self._report_btn.setToolTip("AIが生成した不適切なコンテンツを報告する")
+
+    def _on_report_inappropriate_content_clicked(self) -> None:
+        """Google フォーム（不適切コンテンツ報告）を既定ブラウザで開く。
+
+        Returns:
+            None
+        """
+        QDesktopServices.openUrl(QUrl(_INAPPROPRIATE_CONTENT_REPORT_FORM_URL))
 
     def _summary_dirty(self) -> bool:
         """要約が最後に読み込んだ基準から変更されているか。

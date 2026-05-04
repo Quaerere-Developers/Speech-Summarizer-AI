@@ -391,8 +391,7 @@ def meeting_detail_theme(*, dark: bool | None = None) -> MeetingDetailTheme:
             }
             QPushButton:hover { background-color: #42a5f5; }
             """,
-            summary_edit_qss=(
-                f"""
+            summary_edit_qss=(f"""
             QTextEdit {{
                 background-color: #2a2a2e;
                 border: 1px solid #45454e;
@@ -401,9 +400,7 @@ def meeting_detail_theme(*, dark: bool | None = None) -> MeetingDetailTheme:
                 color: {summary_body_fg};
                 font-size: 15px;
             }}
-            """
-                + nested_scrollbar_overlay_qss("QTextEdit", dark=True)
-            ),
+            """ + nested_scrollbar_overlay_qss("QTextEdit", dark=True)),
             transcript_shell_bg="#1e1e22",
             transcript_hint_color="#a0a0a8",
             transcript_row_bg="#2a2a2e",
@@ -483,8 +480,7 @@ def meeting_detail_theme(*, dark: bool | None = None) -> MeetingDetailTheme:
         }
         QPushButton:hover { background-color: #42a5f5; }
         """,
-        summary_edit_qss=(
-            f"""
+        summary_edit_qss=(f"""
         QTextEdit {{
             background-color: #ffffff;
             border: 1px solid #e0e0e0;
@@ -493,9 +489,7 @@ def meeting_detail_theme(*, dark: bool | None = None) -> MeetingDetailTheme:
             color: {summary_body_fg};
             font-size: 15px;
         }}
-        """
-            + nested_scrollbar_overlay_qss("QTextEdit", dark=False)
-        ),
+        """ + nested_scrollbar_overlay_qss("QTextEdit", dark=False)),
         transcript_shell_bg="#fafafa",
         transcript_hint_color="#555555",
         transcript_row_bg="#ffffff",

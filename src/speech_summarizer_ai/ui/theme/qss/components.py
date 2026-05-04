@@ -17,7 +17,6 @@ from speech_summarizer_ai.ui.theme.theme_basics import (
     summary_card_disabled_surface_bg,
 )
 
-
 # =============================================================================
 # 一覧ウィンドウ共通
 # =============================================================================
@@ -549,9 +548,7 @@ def record_action_button_qss(*, recording: bool) -> str:
     """
     disabled = _record_action_button_disabled_qss()
     if recording:
-        return (
-            base
-            + """
+        return base + """
     QPushButton {
         background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
             stop:0 #ff5252, stop:1 #c62828);
@@ -566,12 +563,8 @@ def record_action_button_qss(*, recording: bool) -> str:
         background: #b71c1c;
         border: 2px solid #ffcdd2;
     }
-    """
-            + disabled
-        )
-    return (
-        base
-        + """
+    """ + disabled
+    return base + """
     QPushButton {
         background-color: #d32f2f;
         border: 2px solid rgba(255, 255, 255, 0.9);
@@ -584,9 +577,7 @@ def record_action_button_qss(*, recording: bool) -> str:
         background-color: #b71c1c;
         border: 2px solid #ffecb3;
     }
-    """
-        + disabled
-    )
+    """ + disabled
 
 
 # 後方互換: 待機時（未録音）の Record ボタン QSS のみ。
