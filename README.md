@@ -77,4 +77,4 @@ pyinstaller --noconfirm speech_summarizer_ai.spec
 pyinstaller --noconfirm --clean speech_summarizer_ai.spec
 ```
 
-成果物は **`dist/SpeechSummarizerAI.exe` の 1 ファイル**（onefile）です。初回起動時に展開のため、onedir 版より起動が遅くなることがあります。
+成果物は **`dist/SpeechSummarizerAI.exe` の 1 ファイル**（onefile）です。
