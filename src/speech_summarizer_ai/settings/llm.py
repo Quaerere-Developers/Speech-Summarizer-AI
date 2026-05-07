@@ -14,6 +14,9 @@ FOUNDRY_LLM_MODEL_ALIAS: str = "phi-4-mini"
 # ``True`` で LLM 重みを ``models/llm`` に置き起動時に検査。``False`` は SDK 既定キャッシュ。
 FOUNDRY_LLM_CACHE_IN_PROJECT: bool = True
 
+# Foundry モデル DL が「Download was cancelled」等で失敗したときの自動再試行上限（起動ダイアログ）。
+FOUNDRY_LLM_DOWNLOAD_CANCEL_AUTO_RETRY_MAX: int = 3
+
 # 会話タイトルの最大文字数。
 FOUNDRY_LLM_TITLE_MAX_CHARS: int = 48
 
