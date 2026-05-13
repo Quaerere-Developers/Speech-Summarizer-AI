@@ -1,8 +1,6 @@
 """LLM 連携（要約など）。Foundry Local はオプション依存。"""
 
 from speech_summarizer_ai.llm.foundry_local import (
-    DEFAULT_SUMMARY_SYSTEM_PROMPT,
-    DEFAULT_TITLE_SYSTEM_PROMPT,
     FoundryLocalModelNotCachedError,
     FoundryLocalNotAvailableError,
     FoundryLocalSummarizer,
@@ -12,6 +10,10 @@ from speech_summarizer_ai.llm.foundry_local import (
     probe_foundry_llm_ready,
     sanitize_meeting_title,
     summarize_transcript_with_foundry_local,
+)
+from speech_summarizer_ai.llm.prompts import (
+    DEFAULT_SUMMARY_SYSTEM_PROMPT,
+    DEFAULT_TITLE_SYSTEM_PROMPT,
 )
 from speech_summarizer_ai.llm.meeting_summarizer import (
     MeetingLlmOutcome,

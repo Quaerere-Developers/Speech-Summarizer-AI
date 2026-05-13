@@ -14,6 +14,13 @@ from pathlib import Path
 from typing import Any
 
 from speech_summarizer_ai import settings as config
+from speech_summarizer_ai.llm.prompts import (
+    DEFAULT_MAP_EXTRACT_SYSTEM_PROMPT,
+    DEFAULT_REFINE_SYSTEM_PROMPT,
+    DEFAULT_SUMMARY_SYSTEM_PROMPT,
+    DEFAULT_TITLE_SYSTEM_PROMPT,
+    MAP_EXTRACT_RETRY_USER_SUFFIX,
+)
 from speech_summarizer_ai.platform_utils import paths
 
 
@@ -67,106 +74,6 @@ def _import_sdk() -> tuple[type, type]:
         ) from e
 
 
-# インポート時に 1 回だけ束ねる（同一 str オブジェクトを共有する）。
-DEFAULT_SUMMARY_SYSTEM_PROMPT: str = """あなたはビジネス文書の要約に熟練したアシスタントです。
-ユーザーから「---文字起こし本文---」のあとに続く会話ログだけを根拠に、日本語でプロフェッショナルな要約を書いてください。
-
-入力の特徴:
-- 行頭に `[HH:MM:SS]` などの時刻が付いたリアルタイム文字起こしが多く含まれます。時刻は「いつ頃どの話題が出たか」の手がかりに使い、必要な箇所だけ簡潔に参照して構いません（時刻の列挙や全文の時系列コピーは不要です）。
-
-文体・品質:
-- 丁寧で簡潔なビジネス調（です・ます調）に統一する。
-- 箇条書きまたは短い段落で、意思決定者が一目で把握できる構造にする。
-
-含める内容（該当がなければ省略）:
-- 会話の目的または概要
-- 合意・決定事項
-- 未決の論点・リスク
-- 次のアクション（分かる範囲で担当・期限を明記）
-
-厳守:
-- 文字起こしの繰り返し・コピペは禁止。要約は原文より短いことが原則。
-- 入力にない事実の補完・推測は禁止。
-- 出力は要約本文のみ（挨拶、前置き、「以下に要約します」等は禁止）。
-"""
-
-DEFAULT_TITLE_SYSTEM_PROMPT: str = """あなたはビジネス文書・会議記録のタイトル付けに熟練したアシスタントです。
-ユーザーから「---文字起こし本文---」のあとに続く会話ログだけを根拠に、一覧・議事・CRM に載せるのにふさわしい、プロフェッショナルで具体的な日本語タイトルを1つだけ出力してください。
-
-入力の特徴:
-- `[HH:MM:SS]` 等の時刻付き行が含まれることがあります。内容の主題を把握するための参考にし、タイトルに時刻を無理に入れる必要はありません（時刻だらけのタイトルは避ける）。
-
-厳守:
-- 出力はタイトル文字列そのもののみ（1行。改行・箇条書き・番号・引用符は付けない）。
-- 件名のように簡潔かつ内容が伝わる語を選ぶ。「打ち合わせ」「会議」単独のような泛用語だけのタイトルは避ける。
-- 入力にない固有名詞や案件名の捏造は禁止。
-- 前置き（「タイトル:」「【」等）は禁止。
-"""
-
-DEFAULT_REFINE_SYSTEM_PROMPT: str = """あなたはビジネス文書の要約に熟練したアシスタントです。
-「---既存の要約---」の後に続く要約と、「---追加の文字起こし---」の後に続く会話ログだけを根拠に、1 つの統合要約として書き直してください。
-
-更新ルール:
-- 既存の要約の要点を残し、追加の文字起こしの新情報だけを統合する（既存文をそのまま複数回貼り付けない）。
-- 内容が重複する箇所は 1 つにまとめる。
-- 新しい決定・アクションがあれば追記する。
-
-文体・品質:
-- 丁寧で簡潔なビジネス調（です・ます調）。
-- 箇条書きまたは短い段落。意思決定者が一目で把握できること。
-
-厳守（違反しないこと）:
-- 文字起こしのコピペは禁止。入力にない事実の補完・推測は禁止。
-- 出力は会議内容の要約のみ。挨拶・前置き・作業説明は禁止。
-- 「要約のプロセス」「統合した要約」「会話の継続性」「続きを統合」など、要約作業そのものを説明するメタ文は一切書かない。
-- 同じ一文を 2 回以上書かない。似た言い回しの繰り返しも禁止。
-- 出力は 400 文字以内を目安に。無意味に長くしない。
-- 出力は文末を必ず 「。」「！」「？」 のいずれかで終える。ぶつ切り・文の途中で終えない。
-"""
-
-# ── Map-Reduce 用プロンプト ────────────────────────────────────────────────────
-
-DEFAULT_MAP_EXTRACT_SYSTEM_PROMPT: str = """あなたは会議分析エンジンです。
-会議の文字起こしから、議事録に必要な情報を JSON 形式で抽出してください。
-
-以下の項目は、最終要約で使われる構成（「会話の目的または概要」「合意・決定事項」「未決の論点・リスク」「次のアクション」）に対応させること:
-- 「目的・概要」: purpose_summary と main_topics（論点・話題）
-- 「決定・合意」: decisions
-- 「未決・リスク」: open_issues と risks
-- 「次のアクション」: action_items（担当・期限が分かる場合は記入）
-
-重要:
-- 文章としてきれいに要約しない。情報を削りすぎない。
-- 決定事項・TODO・課題・論点・重要発言を漏らさない。
-- 不明な情報は推測しない。話者名がある場合は保持する。
-- 「高い自信を持って」「誰かが」のような抽象・テンプレ文言は禁止。事実は短い具体文で書く。
-- key_facts / key_quotes は補足用。なくてよい。key_quotes は原文の短い引用のみ。同じ発言の重複はしない。
-- 出力は JSON のみ（コードブロック・前置き・説明文は不要）。
-- JSON は必ず `}` まで完結させる。生成が途中で途切れないよう、配列は重要なものから各15件程度まで、文字列は短文に抑える。改行インデントは省いてコンパクトでもよい。
-- 項目が無い場合は purpose_summary は空文字、配列は [] にする。
-
-出力形式:
-{
-  "chunk_title": "この区間の主題（15字以内）",
-  "purpose_summary": "（ねらい・目的または概要を1〜2文。該当がなければ空文字でよい）",
-  "main_topics": [],
-  "decisions": [{"content": "", "speaker": "", "confidence": "high|medium|low"}],
-  "action_items": [{"task": "", "owner": "", "due_date": "", "confidence": "high|medium|low"}],
-  "open_issues": [],
-  "risks": [],
-  "key_facts": [],
-  "key_quotes": []
-}
-"""
-
-
-_MAP_EXTRACT_RETRY_USER_SUFFIX: str = (
-    "\n\n【再出力の指示】生成がトークン上限で途中終了した場合に備えます。"
-    "インデントは禁止に近いほど省き、各文字列は短文、各配列は重要な順に最大8件まで。"
-    "必ず最後の「}」まで含めた完全な JSON オブジェクト 1 つのみを出力してください。"
-)
-
-
 def _wrap_transcript_for_summary_user_message(transcript_body: str) -> str:
     """要約用 user メッセージ本文を組み立てる（文字起こし区画を明示する）。
 
@@ -186,15 +93,15 @@ def _wrap_transcript_for_summary_user_message(transcript_body: str) -> str:
 
 
 def _wrap_structured_notes_for_summary_user_message(notes_body: str) -> str:
-    """統合済み情報メモを、:data:`DEFAULT_SUMMARY_SYSTEM_PROMPT` 用の user 本文へ載せる。
+    """チャンク統合メモを要約用の user 本文に載せる。
 
-    ``---文字起こし本文---`` 直下に並ぶテキストは「会話ログ相当の根拠」として扱わせる。
+    ``---文字起こし本文---`` 以降を根拠テキストとする点は ``summarize_transcript`` と同形式。
 
     Args:
         notes_body: チャンク抽出を種類別に統合し整形したプレーンテキスト。
 
     Returns:
-        str: ``summarize_transcript`` と同形式の user ロール本文。
+        str: LLM に渡す user ロール本文。
     """
     body = notes_body.strip()
     return (
@@ -958,6 +865,7 @@ class FoundryLocalSummarizer:
                 continue
             seen.add(mid)
             out.append(mid)
+
         return out
 
     def load_model(
@@ -1575,8 +1483,8 @@ class FoundryLocalSummarizer:
         3 段階パイプライン:
 
         - **Phase 1 (Map)**: 各チャンクから構造化 JSON を抽出。
-        - **Phase 2 (Merge)**: 種類別に統合・重複排除（Python のみ）。
-        - **Phase 3 (Write)**: 統合メモを ``self._system_prompt``（既定は :data:`DEFAULT_SUMMARY_SYSTEM_PROMPT`）で要約し、最終本文を生成。
+        - **Phase 2 (Merge)**: 種類別に統合・重複排除。
+        - **Phase 3 (Write)**: 統合メモを要約し、最終議事録本文を生成する。
 
         Args:
             transcript: 文字起こし全文。
@@ -1654,7 +1562,7 @@ class FoundryLocalSummarizer:
                 client.settings.max_tokens = (
                     config.FOUNDRY_LLM_MAP_EXTRACT_RETRY_MAX_TOKENS
                 )
-                retry_user = user_msg.strip() + _MAP_EXTRACT_RETRY_USER_SUFFIX
+                retry_user = user_msg.strip() + MAP_EXTRACT_RETRY_USER_SUFFIX
                 retry_messages: list[dict[str, str]] = [
                     {"role": "system", "content": DEFAULT_MAP_EXTRACT_SYSTEM_PROMPT},
                     {"role": "user", "content": retry_user},
@@ -1685,7 +1593,7 @@ class FoundryLocalSummarizer:
                 )
             extracts.append(_chunk_extract_from_dict(idx, parsed))
 
-        # ── Phase 2: Merge（Python による種類別統合・重複排除）─────────────────
+        # ── Phase 2: Merge（種類別統合・重複排除）─────────────────
         if on_progress:
             on_progress("[Map-Reduce] 情報を統合中 …")
         merged = _merge_chunk_extracts(extracts)
@@ -1722,7 +1630,7 @@ class FoundryLocalSummarizer:
             print(f"[map-reduce] write error: {exc}", flush=True)
 
         final_text = _finalize_refine_segment(write_buf_text)
-        # 空、または同一フレーズの異常反復なら一括要約（DEFAULT_SUMMARY_SYSTEM_PROMPT 経路）へ
+        # 空、または同一フレーズの異常反復なら全文一括要約へフォールバック
         if (not final_text.strip()) or _has_excessive_repetition(final_text):
             print(
                 "[map-reduce] 最終要約が空、または反復異常のため一括要約にフォールバックします。",
