@@ -9,7 +9,7 @@ AUTO_LLM_SUMMARIZE_AFTER_STT: bool = True
 FOUNDRY_LLM_APP_NAME: str = "Speech-Summarizer-AI"
 
 # 要約モデルのカタログ別名。SDK が環境に合う完全 ID に解決する。完全 ID 直書きも可。
-FOUNDRY_LLM_MODEL_ALIAS: str = "phi-4-mini"
+FOUNDRY_LLM_MODEL_ALIAS: str = "qwen2.5-7b"
 
 # ``True`` で LLM 重みを ``models/llm`` に置き起動時に検査。``False`` は SDK 既定キャッシュ。
 FOUNDRY_LLM_CACHE_IN_PROJECT: bool = True
@@ -33,7 +33,7 @@ FOUNDRY_LLM_REFINE_CHUNK_SIZE: int = 2200
 FOUNDRY_LLM_REFINE_CHUNK_OVERLAP: int = 240
 
 # Map: 文字起こし 1 チャンクの最大文字数（改行単位で分割）。
-FOUNDRY_LLM_MAP_CHUNK_SIZE: int = 2000
+FOUNDRY_LLM_MAP_CHUNK_SIZE: int = 6000
 
 # Map: チャンクから JSON 抽出するときの ``max_tokens``。小さいと JSON が途中で切れる。
 FOUNDRY_LLM_MAP_EXTRACT_MAX_TOKENS: int = 2400
