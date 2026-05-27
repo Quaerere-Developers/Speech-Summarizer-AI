@@ -1,10 +1,7 @@
 """起動時に STT 不足分と必要なら Foundry LLM を取得する。
 
-LLM 取得ダイアログの要否は **3 ステップのファイル存在確認** のみで決め、Foundry SDK での load 試行は行わない。
-
-1. ``models/llm/.speech_summarizer_llm_probe_ok`` の有無
-2. マーカー 2 行目の解決済みモデル ID 読み取り
-3. ``models/llm/`` 以下の対応パスに ``model.onnx`` が存在するか
+LLM 取得ダイアログの要否は ``models/llm`` 配下の ``.bin`` と ``.download.progress`` の
+有無のみで決める。Foundry SDK の load / EP 登録は行わない。
 """
 
 from __future__ import annotations
@@ -93,16 +90,11 @@ def _format_bytes(n: int) -> str:
 
 
 def _needs_foundry_llm_download_at_startup(project_root: Path) -> bool:
-    """LLM モデルが揃っているか **3 ステップのファイル存在確認** のみで判定する。
+    """LLM モデルが揃っているかをパス存在のみで判定する。
 
-    Foundry SDK の import / load は行わない。
-
-    ステップ 1: ``FOUNDRY_LLM_CACHE_IN_PROJECT`` が False → プロジェクト側を使わないためダイアログ不要。
-    ステップ 2: ``models/llm/.speech_summarizer_llm_probe_ok`` が無い → 未ダウンロード。
-    ステップ 3: マーカー 2 行目の解決済みモデル ID（例: ``Phi-4-mini-instruct-generic-gpu:5``）が
-               設定エイリアス（``FOUNDRY_LLM_MODEL_ALIAS``）の前方一致（大文字小文字無視）を満たし、
-               かつ ``models/llm/`` 以下の対応パスに ``model.onnx`` があるか。
-               両方 OK → ダイアログ不要。いずれか NG → 再取得が必要。
+    SDK の import / load / EP 登録は行わない。
+    ``FOUNDRY_LLM_CACHE_IN_PROJECT`` が False ならダイアログ不要。True なら
+    ``models/llm`` にエイリアス対応の重みが揃っていればスキップ。
 
     Args:
         project_root (Path): モデル配置の基準パス（``models/llm`` の親）。
@@ -110,26 +102,11 @@ def _needs_foundry_llm_download_at_startup(project_root: Path) -> bool:
     Returns:
         bool: 起動時に LLM 取得 UI を表示するなら True。
     """
-    # ステップ 1: プロジェクト外キャッシュ設定ならスキップ
     if not config.FOUNDRY_LLM_CACHE_IN_PROJECT:
         return False
-
-    # ステップ 2: probe marker ファイルの存在確認
-    if not paths.foundry_llm_probe_marker_path(project_root).is_file():
-        return foundry_sdk_importable()
-
-    # ステップ 3: marker 2 行目の解決済みモデル ID でディレクトリ存在確認
-    alias = config.FOUNDRY_LLM_MODEL_ALIAS
-    resolved_id = paths.read_llm_resolved_id(project_root, alias)
-    if not resolved_id:
-        # marker はあるが 2 行目が空、またはエイリアス不一致 → 再取得
-        return foundry_sdk_importable()
-    # resolved_id が現在のエイリアスから始まるか確認（大文字小文字区別なし）。
-    # 例: alias="phi-4-mini", resolved_id="Phi-4-mini-instruct-generic-gpu:5" → OK
-    # エイリアスが変更されたとき古いマーカーを誤って有効と判定しないための安全弁。
-    if not resolved_id.lower().startswith(alias.lower()):
-        return foundry_sdk_importable()
-    if paths.foundry_llm_model_onnx_present(project_root, resolved_id):
+    if paths.foundry_llm_model_weights_present(
+        project_root, config.FOUNDRY_LLM_MODEL_ALIAS
+    ):
         return False
     return foundry_sdk_importable()
 
@@ -249,6 +226,13 @@ class _StartupModelsWorker(QObject):
             self.finished.emit()
             return
 
+        # 起動判定後にモデルが揃っている場合は EP 登録・DL をスキップ（STT のみのダイアログ等）。
+        if paths.foundry_llm_model_weights_present(
+            self._project_root, config.FOUNDRY_LLM_MODEL_ALIAS
+        ):
+            self.finished.emit()
+            return
+
         self.llm_phase_started.emit()
         attempt = 0
         while True:
@@ -259,10 +243,11 @@ class _StartupModelsWorker(QObject):
                     project_root=self._project_root,
                     model_alias=config.FOUNDRY_LLM_MODEL_ALIAS,
                 )
-                # EXE 起動時など EP 登録（OpenVINO 等）で環境差の失敗を避けるため、
-                # ここでは重みの download のみ。EP と load は初回要約時の load_model へ委ねる。
+                # NPU variant をカタログ可視化するため EP 登録は実施する。
+                # ``model.load()`` は呼ばず重み取得のみで、推論用 load は初回要約に委ねる。
                 summarizer.download_model_weights_only(
                     model_download_progress=self.llm_model_progress.emit,
+                    ep_progress=self.llm_ep_progress.emit,
                 )
                 break
             except FoundryLocalNotAvailableError as e:
@@ -506,7 +491,7 @@ class StartupModelsSetupDialog(QDialog):
         self._in_llm_phase = True
         self._label.setText(
             f"【初回のみ】要約用 LLM「{config.FOUNDRY_LLM_MODEL_ALIAS}」の重みを取得しています。\n"
-            "（実行プロバイダの登録は行いません。初回要約時に行われます。）\n"
+            "実行プロバイダ（EP）の登録とモデル重みの取得を行います。\n"
             "ウィンドウを閉じないでください。"
         )
         self._bytes_label.setText("LLM モデル重み — 準備中…")
@@ -583,8 +568,7 @@ class StartupModelsSetupDialog(QDialog):
 def run_startup_models_setup_if_needed(project_root: Path) -> bool:
     """``models/stt`` と ``models/llm``（設定時）をファイル存在のみで検査する。
 
-    LLM は probe marker + 解決済み ID + ディレクトリ存在の 3 ステップで判定し、起動時に Foundry で load 試行はしない。
-    不足分だけダイアログで取得し、揃えばすぐメインへ。
+    Foundry の load / EP 登録は行わず、不足時のみ取得ダイアログを表示する。
 
     Args:
         project_root (Path): データ／モデル基準パス。

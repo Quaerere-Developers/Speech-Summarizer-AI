@@ -22,6 +22,10 @@ from speech_summarizer_ai.llm.prompts import (
     MAP_EXTRACT_RETRY_USER_SUFFIX,
 )
 from speech_summarizer_ai.platform_utils import paths
+from speech_summarizer_ai.platform_utils.check_device import (
+    DeviceType,
+    detect_best_device,
+)
 
 
 class FoundryLocalNotAvailableError(ImportError):
@@ -782,6 +786,7 @@ class FoundryLocalSummarizer:
         self._temperature = temperature
         self._max_tokens = max_tokens
         root = project_root if project_root is not None else paths.project_root()
+        self._project_root = root
         if config.FOUNDRY_LLM_CACHE_IN_PROJECT:
             self._model_cache_dir = str(
                 paths.foundry_llm_cache_directory(root).resolve()
@@ -826,18 +831,20 @@ class FoundryLocalSummarizer:
                 FoundryLocalSummarizer._manager_initialized = True
             self._manager = FoundryLocalManager.instance
 
-    def _iter_family_variant_ids(self, catalog: Any) -> list[str]:
-        """``list_models()`` から ``self._model_alias`` と同族のモデル ID を列挙する。
+    def _collect_variant_ids(self) -> list[str]:
+        """``self._model_alias`` に一致するキャッシュ済み variant の model_id を収集する。
 
-        Args:
-            catalog: ``FoundryLocalManager.catalog``。
+        前提: ``_ensure_manager()`` と ``download_and_register_eps()`` 実行済み。
 
         Returns:
-            list[str]: 重複のないモデル ID 一覧。取得に失敗した場合は空リスト。
+            list[str]: 重複なしの model_id リスト。マネージャ未初期化・取得失敗時は空リスト。
         """
-        family = self._model_alias.strip()
+        if self._manager is None:
+            return []
+
+        needle = self._model_alias.strip().casefold()
         try:
-            entries = list(catalog.list_models())
+            entries = list(self._manager.catalog.list_models())
         except Exception as e:
             print(
                 f"[summarize] catalog.list_models() 失敗: {type(e).__name__}: {e}",
@@ -848,25 +855,75 @@ class FoundryLocalSummarizer:
 
         out: list[str] = []
         seen: set[str] = set()
-        for entry in entries:
-            mid = getattr(entry, "id", None)
-            malias = getattr(entry, "alias", None)
-            if not isinstance(mid, str) or not mid:
-                continue
-            matches = (
-                malias == family
-                or mid == family
-                or mid.startswith(f"{family}-")
-                or mid.startswith(f"{family}:")
-            )
-            if not matches:
-                continue
-            if mid in seen:
-                continue
-            seen.add(mid)
-            out.append(mid)
 
+        for entry in entries:
+            matched = False
+            for attr in ("alias", "name"):
+                val = getattr(entry, attr, None)
+                if isinstance(val, str) and val.strip().casefold() == needle:
+                    matched = True
+                    break
+            if not matched:
+                mid = getattr(entry, "id", None)
+                if isinstance(mid, str):
+                    m = mid.strip().casefold()
+                    if (
+                        m == needle
+                        or m.startswith(f"{needle}-")
+                        or m.startswith(f"{needle}:")
+                    ):
+                        matched = True
+            if not matched:
+                continue
+
+            variants = getattr(entry, "variants", None) or []
+            if variants:
+                for v in variants:
+                    vid = getattr(v, "id", None)
+                    if isinstance(vid, str) and vid.strip() and vid.strip() not in seen:
+                        seen.add(vid.strip())
+                        out.append(vid.strip())
+            else:
+                eid = getattr(entry, "id", None)
+                if isinstance(eid, str) and eid.strip() and eid.strip() not in seen:
+                    seen.add(eid.strip())
+                    out.append(eid.strip())
+
+        print(f"[summarize] cached variant_ids = {out}", flush=True)
         return out
+
+    @staticmethod
+    def _select_model_id_by_device(
+        model_ids: list[str], device: DeviceType
+    ) -> str | None:
+        """デバイス種別に最適な model_id を NPU > GPU > CPU の優先順で選ぶ。
+
+        Args:
+            model_ids: カタログから収集した variant model_id のリスト。
+            device: ``detect_best_device()`` が返したデバイス種別。
+
+        Returns:
+            str | None: 選択された model_id。候補がなければ None。
+        """
+
+        def _rank(mid: str) -> int:
+            m = mid.lower()
+            flags = {"npu": "npu" in m, "gpu": "gpu" in m, "cpu": "cpu" in m}
+            priority = (
+                ["npu", "gpu", "cpu"]
+                if device == DeviceType.NPU
+                else (
+                    ["gpu", "cpu", "npu"]
+                    if device == DeviceType.GPU
+                    else ["cpu", "gpu", "npu"]
+                )
+            )
+            for rank, key in enumerate(priority):
+                if flags[key]:
+                    return rank
+            return len(priority)
+
+        return min(model_ids, key=_rank) if model_ids else None
 
     def load_model(
         self,
@@ -912,6 +969,14 @@ class FoundryLocalSummarizer:
         catalog = self._manager.catalog
 
         def _mdl(progress: float) -> None:
+            """モデルダウンロード進捗を報告するコールバック。
+
+            Args:
+                progress: 進捗率（0〜100）。
+
+            Returns:
+                None
+            """
             if model_download_progress is not None:
                 model_download_progress(progress)
             else:
@@ -922,25 +987,41 @@ class FoundryLocalSummarizer:
                 )
 
         def _apply_chat_client_settings() -> None:
+            """ロード済みモデルの chat client に推論設定を反映する。
+
+            Returns:
+                None
+            """
             client = self._model.get_chat_client()
             client.settings.temperature = self._temperature
             client.settings.max_tokens = self._max_tokens
 
         def _resolved_id_of(model: Any, fallback: str) -> str:
+            """モデルハンドルから解決済み ID を取得する。
+
+            Args:
+                model: ロード済みモデルハンドル。
+                fallback: ``id`` が無い・空のときに使う文字列。
+
+            Returns:
+                str: モデルの ``id``、または fallback。
+            """
             rid = getattr(model, "id", None)
             return rid if isinstance(rid, str) and rid else fallback
 
-        def _try_load_variant(
-            variant: str, *, retries: int = 0
+        def _try_load_candidate(
+            name: str, *, kind: str, retries: int = 0
         ) -> tuple[Any, BaseException | None]:
-            """指定バリアントで ``get_model`` と ``load`` を試す。
+            """指定した候補でモデルを取得して load() する。
 
             Args:
-                variant: エイリアスまたは完全 ID。
+                name: variant ID または別名。
+                kind: ``"variant"`` または ``"alias"``。
                 retries: 失敗時の追加リトライ回数。
 
             Returns:
-                tuple[Any, BaseException | None]: 成功時は ``(ハンドル, None)``。失敗時は ``(None, 最後の例外)``。
+                tuple[Any, BaseException | None]: 成功時 ``(ハンドル, None)``、
+                    失敗時 ``(None, 最後の例外)``。
             """
             last: BaseException | None = None
             for attempt in range(retries + 1):
@@ -949,16 +1030,21 @@ class FoundryLocalSummarizer:
                 elif attempt >= 2:
                     time.sleep(0.75)
                 try:
-                    handle = catalog.get_model(variant)
+                    if kind == "variant":
+                        handle = catalog.get_model_variant(name)
+                    else:
+                        handle = catalog.get_model(name)
                     if handle is None:
-                        raise RuntimeError("catalog.get_model が None を返した")
+                        raise RuntimeError(
+                            f"catalog.get_model({kind}) が None を返した"
+                        )
                     handle.load()
                     return handle, None
                 except Exception as e:
                     last = e
                     print(
                         f"[summarize] LLM load() 失敗 "
-                        f"(候補={variant!r}, 試行 {attempt + 1}/{retries + 1}): "
+                        f"({kind}={name!r}, 試行 {attempt + 1}/{retries + 1}): "
                         f"{type(e).__name__}: {e}",
                         file=sys.stderr,
                         flush=True,
@@ -967,45 +1053,58 @@ class FoundryLocalSummarizer:
 
         root_for_marker = paths.project_root()
 
-        candidates: list[tuple[str, int]] = []  # (variant, extra retries)
-        seen_candidates: set[str] = set()
+        # load 試行候補（variant 完全 ID を先、alias は最後）
+        candidates: list[tuple[str, str, int]] = []
+        seen_candidates: set[tuple[str, str]] = set()
 
-        def _add_candidate(variant: str | None, retries: int) -> None:
-            if not variant:
+        def _add_candidate(name: str | None, *, kind: str, retries: int) -> None:
+            if not name:
                 return
-            key = variant.strip()
-            if not key or key in seen_candidates:
+            key = (name.strip(), kind)
+            if not key[0] or key in seen_candidates:
                 return
             seen_candidates.add(key)
-            candidates.append((key, retries))
+            candidates.append((key[0], key[1], retries))
 
+        device = detect_best_device()
+        variant_ids = self._collect_variant_ids()
+        best_variant_id = self._select_model_id_by_device(variant_ids, device)
         prev_resolved = paths.read_llm_resolved_id(root_for_marker, self._model_alias)
 
-        # 1) 短いエイリアス（SDK が環境に合うバリアントを解決）。キャッシュ利用時はこれが最も安定。
-        _add_candidate(self._model_alias, retries=2 if not allow_download else 0)
+        if best_variant_id:
+            print(
+                f"[device] {device.name} 向け variant を最優先: {best_variant_id!r}",
+                flush=True,
+            )
+            _add_candidate(
+                best_variant_id,
+                kind="variant",
+                retries=2 if not allow_download else 1,
+            )
 
-        # 2) マーカー記載の解決済み完全 ID は、models/llm に実体があるときだけ試す（カタログとパスがずれた ID の無駄打ちを避ける）
         if prev_resolved and paths.foundry_llm_resolved_weights_present(
             root_for_marker, prev_resolved
         ):
-            _add_candidate(prev_resolved, retries=1)
+            _add_candidate(prev_resolved, kind="variant", retries=1)
 
-        # 3) カタログから列挙したファミリー一致の他バリアント（環境差・コピー移送対策）
-        for cid in self._iter_family_variant_ids(catalog):
-            _add_candidate(cid, retries=0)
+        for cid in variant_ids:
+            _add_candidate(cid, kind="variant", retries=0)
+
+        # 最終フォールバック: 別名（SDK 自動選択。完全 ID で全滅したときの保険）
+        _add_candidate(self._model_alias, kind="alias", retries=0)
 
         last_err: BaseException | None = None
-        loaded_variant: str | None = None
-        for variant, retries in candidates:
-            handle, err = _try_load_variant(variant, retries=retries)
+        loaded_name: str | None = None
+        for name, kind, retries in candidates:
+            handle, err = _try_load_candidate(name, kind=kind, retries=retries)
             if err is None and handle is not None:
                 self._model = handle
                 self._loaded = True
-                loaded_variant = variant
+                loaded_name = name
                 last_err = None
-                resolved = _resolved_id_of(handle, variant)
+                resolved = _resolved_id_of(handle, name)
                 print(
-                    f"[summarize] LLM load 成功: 要求={variant!r} 解決 ID={resolved!r}",
+                    f"[summarize] LLM load 成功: 要求={name!r}({kind}) 解決 ID={resolved!r}",
                     flush=True,
                 )
                 try:
@@ -1017,14 +1116,14 @@ class FoundryLocalSummarizer:
                 break
             last_err = err
 
-        if last_err is None and loaded_variant is not None:
+        if last_err is None and loaded_name is not None:
             _apply_chat_client_settings()
             return
 
         if not allow_download:
             cache_hint = self._model_cache_dir or "（Foundry SDK 既定キャッシュ）"
             hint = _load_failure_user_hint(last_err) if last_err is not None else ""
-            tried = ", ".join(v for v, _ in candidates) or "(なし)"
+            tried = ", ".join(f"{n}({k})" for n, k, _ in candidates) or "(なし)"
             raise FoundryLocalModelNotCachedError(
                 f"LLM モデル {self._model_alias!r} をキャッシュから load() できませんでした。"
                 f"未ダウンロードの場合は起動時の要約モデル取得を完了してください。"
@@ -1035,8 +1134,19 @@ class FoundryLocalSummarizer:
                 f"{hint}"
             ) from last_err
 
-        # ダウンロード経路: 短いエイリアスで取り直し、SDK に環境適合バリアントを選ばせる。
-        download_handle = catalog.get_model(self._model_alias)
+        # ダウンロード経路: 可能ならデバイス最適 variant ID を直接指定（NPU を含む）。
+        if best_variant_id:
+            download_handle = catalog.get_model_variant(best_variant_id)
+            print(
+                f"[device] {device.name} variant をダウンロード対象に指定: {best_variant_id!r}",
+                flush=True,
+            )
+        else:
+            download_handle = catalog.get_model(self._model_alias)
+            print(
+                f"[device] variant 解決不可。alias フォールバックでダウンロード: {self._model_alias!r}",
+                flush=True,
+            )
         download_handle.download(_mdl)
         if model_download_progress is None:
             print()
@@ -1060,14 +1170,15 @@ class FoundryLocalSummarizer:
         self,
         *,
         model_download_progress: Callable[[float], None] | None = None,
+        ep_progress: Callable[[str, float], None] | None = None,
     ) -> None:
-        """起動時ダイアログ用に、モデル重みのダウンロードだけ行う。
+        """起動時ダイアログ用に、デバイス最適 variant の重みダウンロードまで行う。
 
-        実行プロバイダ（OpenVINO 等）の取得・登録（``download_and_register_eps``）は行わない。
-        初回の要約などで :meth:`load_model` を呼んだときに EP 登録と ``load`` が行われる。
+        EP 登録と重み取得のみ（``load()`` なし）。成功時 marker を記録する。
 
         Args:
             model_download_progress: モデル DL 進捗（0〜100）を受け取るコールバック。
+            ep_progress: 任意。EP 名と進捗（0〜100）を受け取るコールバック。
 
         Returns:
             None: キャッシュディレクトリへ重みを取得する。
@@ -1076,8 +1187,47 @@ class FoundryLocalSummarizer:
             FoundryLocalNotAvailableError: SDK が利用できない場合。
             Exception: カタログ取得や ``download`` の失敗。
         """
+        if (
+            config.FOUNDRY_LLM_CACHE_IN_PROJECT
+            and paths.foundry_llm_model_weights_present(
+                self._project_root, self._model_alias
+            )
+        ):
+            print(
+                f"[summarize] LLM weights already present for {self._model_alias!r}; "
+                "skip EP registration and download.",
+                flush=True,
+            )
+            return
+
         self._ensure_manager()
         assert self._manager is not None
+
+        # EP 登録（失敗時は警告のみで続行）
+        current_ep = ""
+
+        def _ep_cb(ep_name: str, percent: float) -> None:
+            nonlocal current_ep
+            if ep_progress is not None:
+                ep_progress(ep_name, percent)
+            else:
+                if ep_name != current_ep:
+                    if current_ep:
+                        print()
+                    current_ep = ep_name
+                print(f"\r  {ep_name:<30}  {percent:5.1f}%", end="", flush=True)
+
+        try:
+            self._manager.download_and_register_eps(progress_callback=_ep_cb)
+            if ep_progress is None and current_ep:
+                print()
+        except Exception as e:
+            print(
+                f"[summarize] EP 登録に失敗（NPU variant が見えない可能性）: "
+                f"{type(e).__name__}: {e}",
+                file=sys.stderr,
+                flush=True,
+            )
 
         catalog = self._manager.catalog
 
@@ -1091,12 +1241,43 @@ class FoundryLocalSummarizer:
                     flush=True,
                 )
 
-        download_handle = catalog.get_model(self._model_alias)
+        # ① デバイス検出 → ② キャッシュ済み variant を取得 → ③ 最適 model_id を選択（未キャッシュ時は alias フォールバック）
+        device = detect_best_device()
+        variant_ids = self._collect_variant_ids()
+        best_id = self._select_model_id_by_device(variant_ids, device)
+
+        if best_id:
+            download_handle = catalog.get_model_variant(best_id)
+            print(
+                f"[device] {device.name} variant を選択: {best_id!r}",
+                flush=True,
+            )
+        else:
+            download_handle = catalog.get_model(self._model_alias)
+            print(
+                f"[device] variant 取得失敗。alias にフォールバック: {self._model_alias!r}",
+                flush=True,
+            )
+
         download_handle.download(_mdl)
         if model_download_progress is None:
             print()
+
+        # probe marker を書く（次回起動の事前判定で再ダウンロードダイアログを避けるため）。
+        resolved_id = getattr(download_handle, "id", None) or best_id or ""
+        if resolved_id:
+            try:
+                paths.write_llm_probe_marker(
+                    paths.project_root(), self._model_alias, str(resolved_id)
+                )
+            except OSError as e:
+                print(
+                    f"[summarize] probe marker 書き込みに失敗: {e}",
+                    file=sys.stderr,
+                    flush=True,
+                )
         print(
-            f"[summarize] LLM weights download only (no EP): alias={self._model_alias!r}",
+            f"[summarize] LLM weights download 完了: model_id={resolved_id or self._model_alias!r}",
             flush=True,
         )
 

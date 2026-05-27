@@ -166,6 +166,7 @@ def foundry_llm_cache_directory(project_root: Path) -> Path:
 
 
 _LLM_PROBE_OK_FILENAME = ".speech_summarizer_llm_probe_ok"
+_LLM_DOWNLOAD_PROGRESS_FILENAME = ".download.progress"
 
 
 def foundry_llm_probe_marker_path(project_root: Path) -> Path:
@@ -265,40 +266,45 @@ def clear_llm_probe_marker(project_root: Path) -> None:
 
 
 def foundry_llm_model_weights_present(project_root: Path, model_alias: str) -> bool:
-    """``models/llm`` 配下に、設定エイリアスに対応する ONNX 重みがあるか（起動時の存在チェック用）。
-
-    Foundry が展開するパス（例: ``.../qwen2.5-0.5b-instruct-.../v2/model.onnx``）を
-    ``model_alias`` の部分一致で判定する。音声認識の ``model.bin`` チェックに相当。
+    """``models/llm`` にエイリアス対応の重みが揃っているか（起動時チェック用）。
 
     Args:
         project_root: リポジトリルート。
-        model_alias: ``config.FOUNDRY_LLM_MODEL_ALIAS`` などカタログのエイリアス。
+        model_alias: カタログのモデルエイリアス。
 
     Returns:
-        bool: エイリアスに一致するパスに ``model.onnx`` が存在し、かつ
-        単体で十分大きいか、または ``model.onnx.data`` に重みがある場合 ``True``。
+        bool: 一致する ``.bin`` があり、``.download.progress`` が無いとき ``True``。
     """
     root = foundry_llm_cache_directory(project_root)
     if not root.is_dir():
         return False
-    token = model_alias.strip()
+    token = model_alias.strip().casefold()
     if not token:
         return False
-    min_bytes = 512 * 1024
-    for p in root.rglob("model.onnx"):
-        try:
-            if token not in p.as_posix():
+
+    try:
+        has_bin = False
+        for p in root.rglob("*.bin"):
+            if not p.is_file() or p.suffix.casefold() != ".bin":
                 continue
-            if not p.is_file():
+            if token not in p.as_posix().casefold():
                 continue
-            sz = p.stat().st_size
-            data = p.with_name(p.name + ".data")
-            data_sz = data.stat().st_size if data.is_file() else 0
-            if sz >= min_bytes or data_sz >= min_bytes:
-                return True
-        except OSError:
-            continue
-    return False
+            has_bin = True
+            break
+    except OSError:
+        return False
+
+    if not has_bin:
+        return False
+
+    try:
+        for progress in root.rglob(_LLM_DOWNLOAD_PROGRESS_FILENAME):
+            if progress.is_file():
+                return False
+    except OSError:
+        return False
+
+    return True
 
 
 def _llm_tree_contains_model_onnx(dir_path: Path) -> bool:
@@ -312,6 +318,22 @@ def _llm_tree_contains_model_onnx(dir_path: Path) -> bool:
     except OSError:
         pass
     return False
+
+
+def foundry_llm_any_weights_present(project_root: Path) -> bool:
+    """設定エイリアスの重みが ``models/llm`` に揃っているか。
+
+    ``foundry_llm_model_weights_present`` を ``FOUNDRY_LLM_MODEL_ALIAS`` で呼ぶ省略版。
+
+    Args:
+        project_root: リポジトリルート。
+
+    Returns:
+        bool: 一致する ``.bin`` があり、``.download.progress`` が無いとき ``True``。
+    """
+    return foundry_llm_model_weights_present(
+        project_root, config.FOUNDRY_LLM_MODEL_ALIAS
+    )
 
 
 def foundry_llm_model_onnx_present(project_root: Path, resolved_id: str) -> bool:
