@@ -77,4 +77,4 @@ pyinstaller --noconfirm speech_summarizer_ai.spec
 pyinstaller --noconfirm --clean speech_summarizer_ai.spec
 ```
 
-成果物は **`dist/SpeechSummarizerAI.exe` の 1 ファイル**（onefile）です。
+成果物は **`dist/SpeechSummarizerAI/`** フォルダ（onedir）です。`SpeechSummarizerAI.exe` と同フォルダの DLL 群を一式配布してください。
