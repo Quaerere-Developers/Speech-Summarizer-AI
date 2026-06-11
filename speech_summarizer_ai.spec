@@ -163,20 +163,17 @@ a = Analysis(
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=_block_cipher)
 
+# onedir: 成果物は dist/SpeechSummarizerAI/SpeechSummarizerAI.exe + 同フォルダの DLL 群
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
     [],
+    exclude_binaries=True,
     name="SpeechSummarizerAI",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
-    upx_exclude=[],
-    runtime_tmpdir=None,
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -184,4 +181,15 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=str(_icon_path) if _icon_path.is_file() else None,
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    name="SpeechSummarizerAI",
 )
